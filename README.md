@@ -9,7 +9,7 @@ lints the one you wrote. **design-rails runs the whole loop against your actual
 codebase** — and keeps it true after you leave.
 
 ```
-npx design-rails posture .
+npx -y "github:StartupBros-com/design-rails#v0.2.0" posture .
 ```
 
 ```
@@ -21,7 +21,7 @@ apps/web
   ✓ enforced  CI runs the scanner with budgets
 ```
 
-Five verbs, one loop:
+Six verbs, one loop:
 
 | Verb | What it does |
 | --- | --- |
@@ -29,7 +29,8 @@ Five verbs, one loop:
 | `scan` | Measures drift — raw color literals, one-off Tailwind values, raw palette utilities, missing scales, near-duplicate colors, unresolved tokens — and reads what your theme files *declare* (content-detected theme files, `oklch()`, dark-mode systems, alias resolution). Per-detector CI budgets: `--fail-on=color=2354,palette=3116`. |
 | `propose` | Authors a [Google-spec DESIGN.md](https://github.com/google-labs-code/design.md) + DTCG tokens **from your own code** — declared tokens win by name, residual literals fill gaps weighted by shipped use. Refuses to blend a multi-app workspace into one system nobody owns. |
 | `decide` | Renders open taste decisions (is that purple your brand or a chart library's default?) as visual HTML pages — options side by side on your real canvas — and records your choice. |
-| `tighten` | The one-way ratchet: lowers CI budgets to current actuals after each cleanup, and refuses to absorb an increase. |
+| `tighten` | The one-way ratchet: lowers CI budgets to current actuals after each cleanup, and refuses to absorb an increase. Budgets can be **region-scoped** (`apps/web:color=120`) so each monorepo app ratchets on its own timeline. |
+| `bump` | The one sanctioned budget raise — `bump <key>=<n> <ci-file> --reason="…"`. Refuses without a reason, refuses a non-increase, refuses a target below the measured actual — and writes the reason as a dated comment above the budget line, so `git blame` answers "why did this go up" forever. |
 
 ## Why trust it
 
@@ -57,24 +58,34 @@ dated list of `@google/design.md` v0.4.0 CLI behaviors this tool compensates for
 
 ## Quick start
 
+Run it pinned from GitHub — the bare `design-rails` name is unclaimed on npm,
+so an unpinned `npx design-rails` is a supply-chain bet, not an install:
+
 ```bash
+alias design-rails='npx -y "github:StartupBros-com/design-rails#v0.2.0"'
+
 # 1. Where do you stand?
-npx design-rails posture .
+design-rails posture .
 
 # 2. Author the system you already have (per app, never a monorepo blend):
-npx design-rails propose apps/web --out=apps/web/design
+design-rails propose apps/web --out=apps/web/design
 #    dark-identity brand? --mode=dark
 
 # 3. Settle the taste calls it flags:
-npx design-rails decide apps/web            # renders design/decisions/*.html
-npx design-rails decide apps/web --record charts-palette=violet-ramp --rationale="…"
+design-rails decide apps/web            # renders design/decisions/*.html
+design-rails decide apps/web --record charts-palette=violet-ramp --rationale="…"
 
 # 4. Wire your agents (one section in the app's AGENTS.md / CLAUDE.md):
 #    "design/DESIGN.md is the styling source of truth — read it before any UI work."
 
 # 5. Enforce, and only ever tighten:
-npx design-rails scan . --fail-on=color=2354,palette=3116,arbitrary=1201,orphan=24
-npx design-rails tighten .github/workflows/design.yml
+design-rails scan . --fail-on=color=2354,palette=3116,arbitrary=1201,orphan=24
+#    monorepo? budget per app too — the scan's workspace.regions tallies give
+#    the numbers: --fail-on=color=2354,apps/web:color=120
+design-rails tighten .github/workflows/design.yml
+
+# 6. A budget goes UP exactly one way (new vendored surface, nothing else):
+design-rails bump color=2600 .github/workflows/design.yml --reason="vendored charting kit"
 ```
 
 ## Principles

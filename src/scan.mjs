@@ -36,7 +36,7 @@
   fixing it gets reverted on the next paste.
 */
 
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 
 const DETECTORS = ["color", "arbitrary", "palette", "scale", "nearcolor", "orphan"];
@@ -102,20 +102,88 @@ const MIN_REDUCTION = flagNum("min-reduction", 30);
 // gameable in the direction that matters least: delete 100 colour literals,
 // add 100 palette utilities, total unchanged, gate green, codebase no better.
 // Each detector holding its own line means every category can only go down.
-function parseFailOn(raw) {
-  if (raw === null) return null;
-  if (/^\d+$/.test(raw)) return { total: Number(raw) };
-  const per = {};
-  for (const part of raw.split(",")) {
-    const [k, v] = part.split("=").map((s) => s.trim());
-    if (!DETECTORS.includes(k) || !/^\d+$/.test(v ?? "")) {
+// A budget key is `<detector>` (whole tree) or `<region>:<detector>` (only
+// hits under that directory), e.g. `apps/web:color=120`. Region budgets are
+// what let one monorepo app ratchet down without being hostage to a sibling's
+// backlog (#2). Only the occurrence detectors can be region-scoped: `orphan`
+// resolves names across the whole tree (a var used in one app may be defined
+// in another), so slicing it by directory would manufacture false orphans.
+const REGION_DETECTORS = ["color", "arbitrary", "palette"];
+let HIT_FILES = null; // set by analyse(); see the region-budget note there
+const regionCount = (id, region) =>
+  HIT_FILES?.[id] === undefined ? undefined : HIT_FILES[id].filter((f) => f.startsWith(region + "/")).length;
+function parseBudgetKey(key, flag) {
+  const at = key.lastIndexOf(":");
+  const region = at === -1 ? null : key.slice(0, at).replace(/^\.\//, "").replace(/\/+$/, "");
+  const id = at === -1 ? key : key.slice(at + 1);
+  if (!DETECTORS.includes(id)) {
+    console.error(
+      `design-drift: bad ${flag} budget key '${key}'\n` +
+        `  expected <detector> or <region>:<detector> with detector in: ${DETECTORS.join(", ")}`,
+    );
+    process.exit(2);
+  }
+  if (region !== null) {
+    if (!REGION_DETECTORS.includes(id)) {
       console.error(
-        `design-drift: bad --fail-on budget '${part}'\n` +
-          `  expected a number, or <detector>=<number> with detector in: ${DETECTORS.join(", ")}`,
+        `design-drift: ${flag} cannot region-scope '${id}' — name resolution is\n` +
+          `  whole-tree (a definition may live outside the region), so a regional\n` +
+          `  count would be fiction. Region budgets: ${REGION_DETECTORS.join(", ")}.`,
       );
       process.exit(2);
     }
-    per[k] = Number(v);
+    // A region that matches nothing budgets zero hits and passes forever.
+    // Zero-run-green is the failure mode a ratchet exists to prevent, so every
+    // degenerate form is a hard error, never a silent pass: an absent or
+    // mistyped directory, an empty/'.' region (no relative path starts with
+    // "/"), and a symlink — the walker does not follow symlinks, so a
+    // symlinked region would read 0 while its real target keeps drifting.
+    if (region === "" || region === "." || region.startsWith("/") || region.split("/").includes("..")) {
+      console.error(
+        `design-drift: ${flag} region '${region}' is degenerate — use a root-relative directory like apps/web`,
+      );
+      process.exit(2);
+    }
+    let regionStat = null;
+    try {
+      regionStat = lstatSync(join(root, region));
+    } catch {}
+    if (!regionStat?.isDirectory()) {
+      console.error(
+        `design-drift: ${flag} region '${region}' is not a real directory under ${root}\n` +
+          "  (regions are root-relative paths; symlinks are not walked; a typo here\n" +
+          "   would budget nothing and always pass)",
+      );
+      process.exit(2);
+    }
+  }
+  return { region, id };
+}
+function parseFailOn(raw) {
+  if (raw === null) return null;
+  if (/^\d+$/.test(raw)) return { total: Number(raw) };
+  const per = [];
+  for (const part of raw.split(",")) {
+    const eq = part.lastIndexOf("=");
+    const k = eq === -1 ? part.trim() : part.slice(0, eq).trim();
+    const v = eq === -1 ? "" : part.slice(eq + 1).trim();
+    if (!/^\d+$/.test(v)) {
+      console.error(
+        `design-drift: bad --fail-on budget '${part}'\n` +
+          `  expected a number, or <key>=<number> with key = <detector> or <region>:<detector>`,
+      );
+      process.exit(2);
+    }
+    const { region, id } = parseBudgetKey(k, "--fail-on");
+    const key = region === null ? id : `${region}:${id}`;
+    // One key, one ceiling. v0.1.x silently kept the LAST duplicate; an
+    // enforcement spec where two numbers claim the same key is a mistake
+    // (merge leftovers, usually) and gets said out loud, not resolved quietly.
+    if (per.some((e) => e.key === key)) {
+      console.error(`design-drift: duplicate --fail-on key '${key}' — one key, one ceiling`);
+      process.exit(2);
+    }
+    per.push({ key, region, id, budget: Number(v) });
   }
   return { per };
 }
@@ -577,6 +645,17 @@ function analyse(files) {
     for (const h of f.hits.declared || []) bucket.declared.push({ ...h, file: f.rel });
   }
 
+  // One rel-path entry per hit, kept out of the JSON report: this backs the
+  // region budgets (`apps/web:color=120`), which need "how many hits under
+  // this directory" at enforcement and tighten time. Same semantics as the
+  // global occurrence count — test files included.
+  // Mirrors the enabled() gating on the report sections: a region budget on a
+  // detector that did not run must error exactly like a global one.
+  HIT_FILES = {};
+  for (const id of REGION_DETECTORS) {
+    if (enabled(id)) HIT_FILES[id] = scope.first[id].map((h) => h.file);
+  }
+
   const report = { root, scanned: files.filter(Boolean).length, findings: {} };
 
   if (enabled("color")) {
@@ -709,6 +788,20 @@ function analyse(files) {
       }
     }
     report.findings.workspace = { detected: Boolean(manifest && units.length), manifest, units };
+    // Per-unit occurrence tallies, so introducing a region budget starts from
+    // a measured number instead of a guess: copy the unit's count into
+    // `--fail-on=<unit>:<detector>=<n>` (or add it with a generous ceiling and
+    // let --tighten snap it to the actual).
+    if (report.findings.workspace.detected) {
+      report.findings.workspace.regions = Object.fromEntries(
+        units.map((u) => [
+          u,
+          Object.fromEntries(
+            Object.keys(HIT_FILES).map((id) => [id, HIT_FILES[id].filter((f) => f.startsWith(u + "/")).length]),
+          ),
+        ]),
+      );
+    }
   }
 
   if (enabled("arbitrary")) {
@@ -975,19 +1068,37 @@ report.totalOccurrences = ["color", "arbitrary", "palette"]
   .reduce((n, k) => n + (report.findings[k]?.occurrences || 0), 0);
 console.log(asJson ? JSON.stringify(report, null, 2) : render(report));
 
-// --tighten=<file>: the one-way ratchet as a command (#261, partial — flat
-// budgets only; region scoping stays open). Reads the file's --fail-on=<spec>,
-// lowers every per-detector budget to the measured actual, and REFUSES when
-// any actual exceeds its budget: absorbing an increase is the anti-feature
-// (the planted negative in the work-spec). Born of doing this by hand three
-// times in one day of migrations.
+// --tighten=<file>: the one-way ratchet as a command. Reads the file's
+// --fail-on=<spec> (global and region keys alike), lowers every budget to the
+// measured actual, and REFUSES when any actual exceeds its budget: absorbing
+// an increase is the anti-feature (the planted negative in the work-spec).
+// Born of doing this by hand three times in one day of migrations. The one
+// sanctioned raise is --bump, below (#2).
 const tightenPath = (() => {
   const a = args.find((x) => x.startsWith("--tighten="));
   return a ? a.slice("--tighten=".length) : null;
 })();
-if (tightenPath) {
+const bumpRaw = (() => {
+  const a = args.find((x) => x.startsWith("--bump="));
+  return a ? a.slice("--bump=".length) : null;
+})();
+if (tightenPath || bumpRaw !== null) {
   const measuredT = (id) =>
     id === "orphan" ? report.findings.orphan?.unresolved : report.findings[id]?.occurrences;
+  // Region keys read through the same tally the gate enforces, so tighten can
+  // never write a number the gate would disagree with.
+  const actualFor = ({ key, region, id }) => {
+    const n = region === null ? measuredT(id) : regionCount(id, region);
+    if (n === undefined) {
+      console.error(`design-drift: budget names '${key}' but that detector did not run`);
+      process.exit(2);
+    }
+    return n;
+  };
+  if (!tightenPath) {
+    console.error("design-drift: --bump needs --tighten=<file> to name the budget file it edits");
+    process.exit(2);
+  }
   let content;
   try {
     content = readFileSync(tightenPath, "utf8");
@@ -995,36 +1106,141 @@ if (tightenPath) {
     console.error(`design-drift: --tighten cannot read ${tightenPath}`);
     process.exit(2);
   }
-  const specM = content.match(/--fail-on=([a-z]+=\d+(?:,[a-z]+=\d+)*)/);
-  if (!specM) {
+  // Comment lines cannot hold the active budget: a staged/commented spec above
+  // the real one must never be the one the tool edits (found by adversarial
+  // review — the region grammar widened the match enough to catch prose).
+  // Identical copies of the live spec (matrix jobs) all move together via
+  // replaceAll; two DIFFERENT specs are ambiguous and refuse loudly rather
+  // than silently maintaining whichever came first.
+  const ENTRY = "(?:[A-Za-z0-9@_./-]+:)?[a-z]+=\\d+";
+  const specRe = new RegExp(`--fail-on=(${ENTRY}(?:,${ENTRY})*)`, "g");
+  const distinctSpecs = new Set();
+  let specSites = 0;
+  for (const line of content.split("\n")) {
+    if (/^\s*#/.test(line)) continue;
+    for (const m of line.matchAll(specRe)) {
+      distinctSpecs.add(m[1]);
+      specSites += 1;
+    }
+  }
+  if (distinctSpecs.size === 0) {
     console.error(`design-drift: --tighten found no per-detector --fail-on=<spec> in ${tightenPath}`);
     process.exit(2);
   }
-  const entries = specM[1].split(",").map((p) => p.split("="));
-  const over = [];
-  const next = entries.map(([id, budget]) => {
-    const actual = measuredT(id);
-    if (actual === undefined) {
-      console.error(`design-drift: --tighten budget names '${id}' but that detector did not run`);
+  if (distinctSpecs.size > 1) {
+    console.error(
+      `design-drift: ${tightenPath} holds ${distinctSpecs.size} DIFFERENT --fail-on specs:\n` +
+        [...distinctSpecs].map((s) => `    --fail-on=${s}`).join("\n") +
+        "\n  tighten/bump maintain exactly one budget line — align the copies or split the file.",
+    );
+    process.exit(2);
+  }
+  const spec = [...distinctSpecs][0];
+  const entries = [];
+  for (const p of spec.split(",")) {
+    const eq = p.lastIndexOf("=");
+    const parsedKey = parseBudgetKey(p.slice(0, eq), "--tighten");
+    const key = parsedKey.region === null ? parsedKey.id : `${parsedKey.region}:${parsedKey.id}`;
+    if (entries.some((e) => e.key === key)) {
+      console.error(`design-drift: duplicate budget key '${key}' in ${tightenPath} — one key, one ceiling`);
       process.exit(2);
     }
-    if (actual > Number(budget)) over.push(`${id} ${actual} > ${budget}`);
-    return [id, Math.min(Number(budget), actual)];
+    entries.push({ key, ...parsedKey, budget: Number(p.slice(eq + 1)) });
+  }
+  const buildSpec = (next) => next.map((e) => `${e.key}=${e.budget}`).join(",");
+
+  // --bump=<key>=<n> --reason="…": the ONE sanctioned way a budget goes up
+  // (#2). Tighten refuses increases by design, so a raise needs its own verb —
+  // distinct in the file's history, and unreviewable without a reason.
+  if (bumpRaw !== null) {
+    const reason = (() => {
+      const a = args.find((x) => x.startsWith("--reason="));
+      return a ? a.slice("--reason=".length).trim() : "";
+    })();
+    if (!reason) {
+      console.error(
+        "design-drift: --bump requires --reason=\"…\" — an unexplained budget\n" +
+          "  increase is exactly the silent regression the ratchet exists to prevent.",
+      );
+      process.exit(2);
+    }
+    const eq = bumpRaw.lastIndexOf("=");
+    if (eq === -1 || !/^\d+$/.test(bumpRaw.slice(eq + 1))) {
+      console.error("design-drift: --bump expects <key>=<number>");
+      process.exit(2);
+    }
+    const target = Number(bumpRaw.slice(eq + 1));
+    const parsed = parseBudgetKey(bumpRaw.slice(0, eq), "--bump");
+    const bumpKey = parsed.region === null ? parsed.id : `${parsed.region}:${parsed.id}`;
+    const entry = entries.find((e) => e.key === bumpKey);
+    if (!entry) {
+      console.error(
+        `design-drift: --bump key '${bumpKey}' is not in the file's --fail-on spec.\n` +
+          "  New budget lines are added by hand (reviewed in the PR that adds them);\n" +
+          "  bump only raises what already exists.",
+      );
+      process.exit(2);
+    }
+    if (target <= entry.budget) {
+      console.error(
+        `design-drift: --bump ${bumpKey} ${entry.budget} -> ${target} is not an increase — use --tighten to lower`,
+      );
+      process.exit(2);
+    }
+    const actual = actualFor({ key: bumpKey, ...parsed });
+    if (target < actual) {
+      console.error(
+        `design-drift: --bump target ${target} is below the measured ${actual} — the gate would stay red.\n` +
+          "  Bump to at least the actual, or fix the drift instead.",
+      );
+      process.exit(2);
+    }
+    const old = entry.budget;
+    entry.budget = target;
+    const newSpec = buildSpec(entries);
+    let out = content.replaceAll(`--fail-on=${spec}`, `--fail-on=${newSpec}`);
+    // The reason outlives the terminal: a dated comment lands directly above
+    // the budget line, so `git blame` answers "why did this go up" forever.
+    // If the budget sits inside a shell continuation (`node scan.mjs . \` +
+    // args on following lines), the comment climbs above the whole command —
+    // a comment inside a continuation chain would truncate the command.
+    const stamp = new Date().toISOString().slice(0, 10);
+    const lines = out.split("\n");
+    const at = lines.findIndex((l) => !/^\s*#/.test(l) && l.includes(`--fail-on=${newSpec}`));
+    if (at !== -1) {
+      let insert = at;
+      while (insert > 0 && /\\\s*$/.test(lines[insert - 1])) insert -= 1;
+      const indent = (lines[insert].match(/^\s*/) || [""])[0];
+      lines.splice(insert, 0, `${indent}# design-drift bump ${bumpKey} ${old} -> ${target} (${stamp}): ${reason}`);
+      out = lines.join("\n");
+    }
+    writeFileSync(tightenPath, out);
+    console.log(`design-drift: bumped ${bumpKey} ${old} -> ${target} in ${tightenPath}\n  reason: ${reason}`);
+    process.exit(0);
+  }
+
+  const over = [];
+  const next = entries.map((e) => {
+    const actual = actualFor(e);
+    if (actual > e.budget) over.push(`${e.key} ${actual} > ${e.budget}`);
+    return { key: e.key, budget: Math.min(e.budget, actual) };
   });
   if (over.length) {
     console.error(
       `design-drift: --tighten refused — drift EXCEEDS budget (${over.join(", ")}).\n` +
-        "  A tighten that absorbs an increase is a ratchet that turns backwards. Fix the drift first.",
+        "  A tighten that absorbs an increase is a ratchet that turns backwards. Fix the drift first.\n" +
+        "  Deliberate trade (new vendored surface)? That is --bump=<key>=<n> --reason=\"…\".",
     );
     process.exit(1);
   }
-  const newSpec = next.map(([id, b]) => `${id}=${b}`).join(",");
-  if (newSpec === specM[1]) {
-    console.log(`design-drift: --tighten — already tight (${newSpec})`);
+  const newSpec = buildSpec(next);
+  if (newSpec === spec) {
+    console.log(`design-drift: --tighten — already tight (${spec})`);
     process.exit(0);
   }
-  writeFileSync(tightenPath, content.replace(`--fail-on=${specM[1]}`, `--fail-on=${newSpec}`));
-  console.log(`design-drift: tightened ${tightenPath}\n  ${specM[1]}\n  -> ${newSpec}`);
+  writeFileSync(tightenPath, content.replaceAll(`--fail-on=${spec}`, `--fail-on=${newSpec}`));
+  const sites = specSites > 1 ? ` (${specSites} sites)` : "";
+  console.log(`design-drift: tightened ${tightenPath}${sites}\n  ${spec}\n  -> ${newSpec}`);
   process.exit(0);
 }
 
@@ -1043,13 +1259,13 @@ if (FAIL_ON !== null) {
       over.push(`total ${report.totalOccurrences} > ${FAIL_ON.total}`);
     }
   } else {
-    for (const [id, budget] of Object.entries(FAIL_ON.per)) {
-      const n = measured(id);
+    for (const { key, region, id, budget } of FAIL_ON.per) {
+      const n = region === null ? measured(id) : regionCount(id, region);
       if (n === undefined) {
-        console.error(`design-drift: budget names '${id}' but that detector did not run (--only/--skip?)`);
+        console.error(`design-drift: budget names '${key}' but that detector did not run (--only/--skip?)`);
         process.exit(2);
       }
-      if (n > budget) over.push(`${id} ${n} > ${budget}`);
+      if (n > budget) over.push(`${key} ${n} > ${budget}`);
     }
   }
 

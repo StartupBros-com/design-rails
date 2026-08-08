@@ -2,17 +2,17 @@
 name: design-rails
 description: >-
   Guardrails that keep AI agents on the project's design system. Use when asked
-  to audit design consistency, author a DESIGN.md from an existing codebase,
-  check design-system posture, settle open design decisions from rendered
-  option pages, tighten drift budgets in CI, or stop AI-generated UI from
-  drifting off-brand.
+  to check design-system posture, author a DESIGN.md from an existing codebase,
+  settle open design decisions from rendered option pages, or tighten drift
+  budgets in CI.
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
 # design-rails
 
-One loop, five verbs. The scripts live in `../../src/` relative to this skill
-(or run `npx design-rails <verb>` when installed as a package).
+One loop, six verbs. The scripts live in `../../src/` relative to this skill
+(or run `npx -y "github:StartupBros-com/design-rails#vX.Y.Z" <verb>` pinned to
+a release — the bare npm name is unclaimed, so never `npx design-rails`).
 
 ## Hard rules
 
@@ -45,7 +45,14 @@ One loop, five verbs. The scripts live in `../../src/` relative to this skill
 5. **Enforce where `enforced` fails.** CI runs
    `node src/scan.mjs . --fail-on=<per-detector budgets>`; after every cleanup,
    `node src/scan.mjs <root> --tighten=<workflow-file>` lowers the budgets.
-   The ratchet refuses to absorb an increase.
+   The ratchet refuses to absorb an increase. In a monorepo, budget per app
+   with `<region>:<detector>=<n>` keys (e.g. `apps/web:color=120`) so one
+   app's cleanup ratchets without waiting on a sibling's backlog — the scan's
+   `workspace.regions` tallies give the starting numbers, or add the key with
+   a generous ceiling and let `--tighten` snap it to the actual. The one
+   sanctioned raise is `--bump=<key>=<n> --reason="…"` (new vendored surface
+   landing, and nothing else); hand-edited increases belong in their own
+   reviewed PR.
 
 ## Verification
 
