@@ -1,13 +1,11 @@
 ---
 name: design-rails
 description: >-
-  Guardrails that keep AI agents on the project's design. Posture-check whether a
-  real, agent-wired, CI-enforced design system exists; derive a Google-spec
-  DESIGN.md from the code the project already ships; render open taste decisions
-  as visual pages for the human; enforce drift budgets that only move down. Use
-  when asked to audit design consistency, author a DESIGN.md from an existing
-  codebase, check design-system posture, or stop AI-generated UI from drifting
-  off-brand. Read-only on application source.
+  Guardrails that keep AI agents on the project's design system. Use when asked
+  to audit design consistency, author a DESIGN.md from an existing codebase,
+  check design-system posture, settle open design decisions from rendered
+  option pages, tighten drift budgets in CI, or stop AI-generated UI from
+  drifting off-brand.
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
