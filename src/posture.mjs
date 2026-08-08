@@ -139,7 +139,13 @@ function checkApp(app, repoRoot) {
   if (existsSync(wfDir)) {
     for (const e of readdirSync(wfDir)) {
       const wf = read(join(wfDir, e)) || "";
-      if (/scan\.mjs/.test(wf) && /--fail-on=/.test(wf)) {
+      // The scanner is invoked either as a file (`node …/scan.mjs`) or as the
+      // packaged verb (`npx github:…/design-rails#<pin>" scan`, `design-rails
+      // scan`). Requiring the literal `scan.mjs` made posture report its OWN
+      // gate as missing the moment a repo switched to the pinned-npx form —
+      // found by dogfooding the v0.2.0 switch on the reference monorepo.
+      const runsScanner = /scan\.mjs/.test(wf) || /design-rails[^\n]*\bscan\b/.test(wf);
+      if (runsScanner && /--fail-on=/.test(wf)) {
         enforced = true;
         break;
       }
@@ -148,7 +154,7 @@ function checkApp(app, repoRoot) {
   rows.push({
     check: "enforced",
     pass: enforced,
-    note: enforced ? "CI runs the scanner with budgets" : "no workflow runs scan.mjs with --fail-on",
+    note: enforced ? "CI runs the scanner with budgets" : "no workflow runs the scanner with --fail-on",
   });
   return rows;
 }

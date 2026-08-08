@@ -69,6 +69,43 @@ test("workspace posture: healthy passes, naked fails the right rows, api-only is
   });
 });
 
+test("enforced recognizes the pinned-npx invocation, not just scan.mjs", () => {
+  // Found by dogfooding: the reference monorepo switched its gate to
+  // `npx github:…design-rails#<sha>" scan . --fail-on=…` and posture reported
+  // every app unenforced — the tool called its own gate missing.
+  withRoot((root) => {
+    seedWorkspace(root);
+    write(
+      root,
+      ".github/workflows/design.yml",
+      [
+        "env:",
+        "  DESIGN_RAILS_REF: 0123456789abcdef0123456789abcdef01234567",
+        "run: |",
+        '  npx -y "github:StartupBros-com/design-rails#${DESIGN_RAILS_REF}" scan . \\',
+        "    --fail-on=color=10",
+      ].join("\n"),
+    );
+    const d = JSON.parse(posture(root).stdout);
+    const healthy = d.results.find((x) => x.app === "apps/healthy");
+    assert.equal(healthy.rows.find((r) => r.check === "enforced").pass, true);
+  });
+});
+
+test("a design-rails mention without a scan verb is not enforcement", () => {
+  withRoot((root) => {
+    seedWorkspace(root);
+    write(
+      root,
+      ".github/workflows/design.yml",
+      "run: echo design-rails is great # --fail-on=color=10 in prose\n",
+    );
+    const d = JSON.parse(posture(root).stdout);
+    const healthy = d.results.find((x) => x.app === "apps/healthy");
+    assert.equal(healthy.rows.find((r) => r.check === "enforced").pass, false);
+  });
+});
+
 test("a root-level blend is itself a posture failure at a workspace root", () => {
   withRoot((root) => {
     seedWorkspace(root);
