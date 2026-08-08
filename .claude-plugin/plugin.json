@@ -1,7 +1,12 @@
 {
   "name": "design-rails",
-  "version": "0.2.0",
-  "description": "Guardrails that keep AI agents on YOUR design — posture-check, derive, decide, wire, and enforce your design system from the code you already ship.",
-  "author": { "name": "StartupBros", "url": "https://houseofvibe.ai" },
-  "skills": ["./skills/design-rails"]
+  "version": "0.2.1",
+  "description": "Guardrails that keep AI agents on YOUR design \u2014 posture-check, derive, decide, wire, and enforce your design system from the code you already ship.",
+  "author": {
+    "name": "StartupBros",
+    "url": "https://houseofvibe.ai"
+  },
+  "skills": [
+    "./skills/design-rails"
+  ]
 }
