@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -815,5 +815,306 @@ test("reports cleanly on a project with no drift", () => {
     assert.equal(r.findings.arbitrary.occurrences, 0);
     assert.equal(r.findings.scale.clusters.length, 0);
     assert.equal(r.findings.nearcolor.pairs.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Region-scoped budgets + --bump (#2)
+
+// Two apps, differently drifted, plus a prefix-collision trap: `apps/web2`
+// exists precisely so a budget on `apps/web` can prove it does not match it.
+function writeTwoAppWorkspace(root) {
+  write(root, "pnpm-workspace.yaml", "packages:\n  - apps/*\n");
+  write(root, "apps/web/package.json", `{"name":"web"}`);
+  write(root, "apps/web/src/a.tsx", `const a = "#111111"; const b = "#222222";`);
+  write(root, "apps/web2/package.json", `{"name":"web2"}`);
+  write(root, "apps/web2/src/b.tsx", `const c = "#333333"; const d = "#444444"; const e = "#555555";`);
+}
+
+test("region budget counts only hits under the region, with a / boundary", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    // apps/web has 2 colour hits: a budget of 2 passes even though the tree has 5.
+    let r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/web:color=2"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    // …and a budget of 1 fails, naming the region key.
+    r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/web:color=1"], { encoding: "utf8" });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /apps\/web:color 2 > 1/);
+    // apps/web2's 3 hits never leak into apps/web (the startsWith trap).
+    r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/web:color=2,apps/web2:color=3"], {
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+  });
+});
+
+test("region and global budgets compose in one spec", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    const r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=color=5,apps/web:color=2"], {
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const r2 = spawnSync(process.execPath, [scriptPath, root, "--fail-on=color=4,apps/web:color=2"], {
+      encoding: "utf8",
+    });
+    assert.equal(r2.status, 1);
+    assert.match(r2.stderr, /color 5 > 4/);
+  });
+});
+
+test("a mistyped region is a hard error, never a silent pass", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    const r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/wbe:color=0"], { encoding: "utf8" });
+    assert.equal(r.status, 2, "zero-run-green is the failure mode a ratchet exists to prevent");
+    assert.match(r.stderr, /not a real directory/);
+  });
+});
+
+test("orphan refuses region scoping — name resolution is whole-tree", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    const r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/web:orphan=0"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /cannot region-scope/);
+  });
+});
+
+test("workspace report carries per-unit tallies for budget introduction", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    const r = scan(root);
+    assert.equal(r.findings.workspace.detected, true);
+    assert.equal(r.findings.workspace.regions["apps/web"].color, 2);
+    assert.equal(r.findings.workspace.regions["apps/web2"].color, 3);
+  });
+});
+
+test("--tighten maintains region budgets and refuses a regional increase", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    // The documented introduction flow: add the region with a generous ceiling
+    // and let tighten snap it to the measured actual.
+    write(
+      root,
+      "ci.yml",
+      ["jobs:", "  gate:", "    run: |", "      node scan.mjs . \\", "        --fail-on=color=99,apps/web:color=99"].join("\n"),
+    );
+    const ci = join(root, "ci.yml");
+    const r1 = spawnSync(process.execPath, [scriptPath, root, `--tighten=${ci}`], { encoding: "utf8" });
+    assert.equal(r1.status, 0, r1.stderr);
+    assert.match(readFileSync(ci, "utf8"), /--fail-on=color=5,apps\/web:color=2/, "region snapped to its own actual");
+    // Regional drift above budget refuses the WHOLE tighten, file untouched.
+    write(root, "apps/web/src/new.tsx", `const z = "#666666"; const y = "#777777"; const x = "#888888";`);
+    const before = readFileSync(ci, "utf8");
+    const r2 = spawnSync(process.execPath, [scriptPath, root, `--tighten=${ci}`], { encoding: "utf8" });
+    assert.equal(r2.status, 1);
+    assert.match(r2.stderr, /apps\/web:color 5 > 2/);
+    assert.equal(readFileSync(ci, "utf8"), before);
+  });
+});
+
+test("--bump is the one sanctioned raise: reason required, target validated, file rewritten", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    write(
+      root,
+      "ci.yml",
+      ["jobs:", "  gate:", "    run: |", "      node scan.mjs . \\", "        --fail-on=color=2,apps/web:color=2"].join("\n"),
+    );
+    const ci = join(root, "ci.yml");
+    const run = (...extra) =>
+      spawnSync(process.execPath, [scriptPath, root, `--tighten=${ci}`, ...extra], { encoding: "utf8" });
+    // No reason → refused.
+    let r = run("--bump=color=9");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /requires --reason/);
+    // Not an increase → refused, points at tighten.
+    r = run("--bump=color=2", "--reason=x");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not an increase/);
+    // Below the measured actual (5) → the gate would stay red → refused.
+    r = run("--bump=color=4", "--reason=x");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /below the measured 5/);
+    // Key not present in the file → refused (additions are hand edits).
+    r = run("--bump=arbitrary=9", "--reason=x");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not in the file's --fail-on spec/);
+    // Valid: raises exactly one entry, leaves the region entry alone.
+    r = run("--bump=color=6", "--reason=vendored surface landed");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /bumped color 2 -> 6/);
+    assert.match(r.stdout, /reason: vendored surface landed/);
+    assert.match(readFileSync(ci, "utf8"), /--fail-on=color=6,apps\/web:color=2/);
+    // --bump without --tighten=<file> has nothing to edit.
+    r = spawnSync(process.execPath, [scriptPath, root, "--bump=color=9", "--reason=x"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /needs --tighten=<file>/);
+  });
+});
+
+// The adversarial-review class: every vector below was found by a skeptic
+// pass over the v0.2.0 diff, reproduced, then fixed. Each test IS the repro.
+
+test("a symlinked region is refused — the walker does not follow symlinks", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    mkdirSync(join(root, "apps/empty"), { recursive: true });
+    symlinkSync(join(root, "apps/empty"), join(root, "apps/linked"));
+    // statSync would bless this; the walker would never enter it; the budget
+    // would read zero forever while the target keeps drifting.
+    const r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/linked:color=0"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a real directory/);
+  });
+});
+
+test("degenerate regions ('', '.', '..') are refused, never vacuously green", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    for (const key of [":color=0", ".:color=0", "../x:color=0"]) {
+      const r = spawnSync(process.execPath, [scriptPath, root, `--fail-on=${key}`], { encoding: "utf8" });
+      assert.equal(r.status, 2, `'${key}' must refuse (no relative hit path can ever match it)`);
+      assert.match(r.stderr, /degenerate/);
+    }
+  });
+});
+
+test("duplicate budget keys refuse instead of silently resolving", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    // v0.1.x kept the LAST duplicate (object assignment); the array rewrite
+    // would have silently enforced BOTH. Neither silence survives.
+    const r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=color=3,color=100"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /duplicate --fail-on key 'color'/);
+  });
+});
+
+test("--tighten ignores commented-out specs and edits the live one", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    write(
+      root,
+      "ci.yml",
+      [
+        "jobs:",
+        "  gate:",
+        "    run: |",
+        "      # staged for later: --fail-on=v1:color=500",
+        "      node scan.mjs . \\",
+        "        --fail-on=color=99",
+      ].join("\n"),
+    );
+    const ci = join(root, "ci.yml");
+    const r = spawnSync(process.execPath, [scriptPath, root, `--tighten=${ci}`], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const after = readFileSync(ci, "utf8");
+    assert.match(after, /--fail-on=color=5/, "live spec tightened");
+    assert.match(after, /staged for later: --fail-on=v1:color=500/, "comment untouched");
+  });
+});
+
+test("two DIFFERENT live specs in one file refuse as ambiguous", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    write(
+      root,
+      "ci.yml",
+      ["      node scan.mjs . --fail-on=color=99", "      node scan.mjs . --fail-on=color=50,arbitrary=9"].join("\n"),
+    );
+    const before = readFileSync(join(root, "ci.yml"), "utf8");
+    const r = spawnSync(process.execPath, [scriptPath, root, `--tighten=${join(root, "ci.yml")}`], {
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /2 DIFFERENT --fail-on specs/);
+    assert.equal(readFileSync(join(root, "ci.yml"), "utf8"), before, "ambiguity never edits");
+  });
+});
+
+test("identical spec copies (matrix jobs) all tighten together", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    write(
+      root,
+      "ci.yml",
+      ["      node scan.mjs . --fail-on=color=99", "      node scan.mjs . --fail-on=color=99"].join("\n"),
+    );
+    const ci = join(root, "ci.yml");
+    const r = spawnSync(process.execPath, [scriptPath, root, `--tighten=${ci}`], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /2 sites/);
+    const after = readFileSync(ci, "utf8");
+    assert.equal((after.match(/--fail-on=color=5/g) || []).length, 2, "both copies moved");
+    assert.equal((after.match(/--fail-on=color=99/g) || []).length, 0, "no loose copy left behind");
+  });
+});
+
+test("--bump on a region key validates against the region's actual, not the tree's", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    write(root, "ci.yml", "      node scan.mjs . --fail-on=apps/web:color=1\n");
+    const ci = join(root, "ci.yml");
+    // apps/web actual is 2 (tree total is 5): a target of 4 clears the region
+    // actual — if the code wrongly used the global, this would refuse.
+    let r = spawnSync(
+      process.execPath,
+      [scriptPath, root, `--tighten=${ci}`, "--bump=apps/web:color=4", "--reason=fixture kit"],
+      { encoding: "utf8" },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(readFileSync(ci, "utf8"), /--fail-on=apps\/web:color=4/);
+    // …and a target below the REGION actual refuses on the region's number.
+    write(root, "ci2.yml", "      node scan.mjs . --fail-on=apps/web2:color=1\n");
+    r = spawnSync(
+      process.execPath,
+      [scriptPath, root, `--tighten=${join(root, "ci2.yml")}`, "--bump=apps/web2:color=2", "--reason=x"],
+      { encoding: "utf8" },
+    );
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /below the measured 3/);
+  });
+});
+
+test("two sibling region budgets tighten independently in one run (#2 criterion 1)", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    write(root, "ci.yml", "      node scan.mjs . --fail-on=apps/web:color=99,apps/web2:color=3\n");
+    const ci = join(root, "ci.yml");
+    const r = spawnSync(process.execPath, [scriptPath, root, `--tighten=${ci}`], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(
+      readFileSync(ci, "utf8"),
+      /--fail-on=apps\/web:color=2,apps\/web2:color=3/,
+      "app A snapped to its actual; app B, already tight, unchanged",
+    );
+  });
+});
+
+test("--bump persists its reason as a dated comment above the budget's command", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    // The budget sits at the END of a shell continuation chain; the comment
+    // must climb above the whole command or it would truncate it.
+    write(
+      root,
+      "ci.yml",
+      ["jobs:", "  gate:", "    run: |", "      node scan.mjs . \\", "        --fail-on=color=5"].join("\n"),
+    );
+    const ci = join(root, "ci.yml");
+    const r = spawnSync(
+      process.execPath,
+      [scriptPath, root, `--tighten=${ci}`, "--bump=color=9", "--reason=vendored charting kit"],
+      { encoding: "utf8" },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const lines = readFileSync(ci, "utf8").split("\n");
+    const cmd = lines.findIndex((l) => l.includes("node scan.mjs"));
+    assert.match(lines[cmd - 1], /# design-drift bump color 5 -> 9 \(\d{4}-\d{2}-\d{2}\): vendored charting kit/);
+    assert.match(lines[cmd + 1], /--fail-on=color=9/, "continuation chain intact");
   });
 });

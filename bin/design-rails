@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// design-rails dispatcher: posture | scan | propose | decide | tighten
+// design-rails dispatcher: posture | scan | propose | decide | tighten | bump
 // Each verb is a self-contained dependency-free script; this file only routes.
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -13,8 +13,11 @@ const VERBS = {
   scan: "scan.mjs",
   propose: "propose.mjs",
   decide: "decide.mjs",
-  // tighten is a scan mode: `design-rails tighten <file> [root]`
+  // tighten and bump are scan modes:
+  //   design-rails tighten <file> [root]
+  //   design-rails bump <key>=<n> <file> [root] --reason="…"
   tighten: null,
+  bump: null,
 };
 
 if (!verb || !(verb in VERBS)) {
@@ -25,13 +28,20 @@ usage:
   design-rails scan <root> [--json] [--fail-on=…] drift measurement + CI gate
   design-rails propose <app> [--mode=dark] [--out=design/]  author DESIGN.md + tokens
   design-rails decide <app> [--record slug=option]          visual decision pages
-  design-rails tighten <budgets-file> [root]     lower CI budgets to actuals`);
+  design-rails tighten <budgets-file> [root]     lower CI budgets to actuals
+  design-rails bump <key>=<n> <budgets-file> [root] --reason="…"
+                                                 the one sanctioned budget raise
+                                                 (key: <detector> or <region>:<detector>)`);
   process.exit(verb ? 2 : 0);
 }
 
+const flags = rest.filter((a) => a.startsWith("--"));
+const positional = rest.filter((a) => !a.startsWith("--"));
 const argv =
   verb === "tighten"
-    ? [join(src, "scan.mjs"), rest[1] || ".", `--tighten=${rest[0]}`]
-    : [join(src, VERBS[verb]), ...rest];
+    ? [join(src, "scan.mjs"), positional[1] || ".", `--tighten=${positional[0]}`, ...flags]
+    : verb === "bump"
+      ? [join(src, "scan.mjs"), positional[2] || ".", `--tighten=${positional[1]}`, `--bump=${positional[0]}`, ...flags]
+      : [join(src, VERBS[verb]), ...rest];
 const r = spawnSync(process.execPath, argv, { stdio: "inherit" });
 process.exit(r.status ?? 1);
