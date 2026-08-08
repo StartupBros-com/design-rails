@@ -1,0 +1,15 @@
+design-rails NOTICE
+
+This project is first-party original work. Three IDEAS (not code) are adapted
+from open-source projects, with thanks:
+
+- plugin87/ux-ui-agent-skills (MIT): the raw-palette-utility detector concept,
+  token-context awareness (a value reached through var()/theme() is not a
+  hardcode), and the unresolved-token detector concept.
+- pbakaus/impeccable (Apache-2.0): the roles-not-swatches method and the
+  rule-of-3 for token promotion.
+- murphytrueman/design-system-ops (MIT): the primitive/semantic/component
+  DTCG tier architecture.
+
+Output format targets the DESIGN.md specification by Google (google-labs-code/
+design.md, Apache-2.0); this project bundles none of its code.
