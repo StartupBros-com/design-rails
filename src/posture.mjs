@@ -26,7 +26,7 @@
 */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -120,6 +120,55 @@ function checkApp(app, repoRoot) {
         : "no CLAUDE.md — Claude Code will not load the instructions (add an @AGENTS.md pointer)",
   });
 
+  // Brand scopes (#9): an app with design/brands.json is a multi-brand
+  // surface, and its posture is judged per brand. The check that would have
+  // caught the original blend: a brands registry alongside an app-level
+  // DESIGN.md that still claims a `primary` is one brand crowned over the
+  // others — the app file's job is the shared shell.
+  const brandsPath = join(app, "design", "brands.json");
+  if (existsSync(brandsPath)) {
+    let brands = null;
+    try {
+      brands = JSON.parse(read(brandsPath) || "");
+    } catch {
+      rows.push({ check: "brands", pass: false, note: "design/brands.json is not valid JSON — a broken registry fences nothing" });
+    }
+    if (brands) {
+      const appFm = exists ? (read(designMd) || "").split("\n---\n")[0] : "";
+      const claimsBrand = /^ {2}(primary|action\.primary):/m.test(appFm);
+      rows.push({
+        check: "brands",
+        pass: !claimsBrand,
+        note: claimsBrand
+          ? `brands.json declares ${Object.keys(brands).length} brands but the app-level DESIGN.md still claims a primary — one brand crowned over the others; keep the app file to shared shell`
+          : `${Object.keys(brands).length} brands registered; app-level file is shell-only`,
+      });
+      for (const [name, b] of Object.entries(brands)) {
+        if (b.system === null) {
+          rows.push({ check: `brand:${name}`, pass: null, note: "registered, underived — colours attributed; derive when its page ships" });
+          continue;
+        }
+        const sysPath = join(app, b.system);
+        const sysExists = existsSync(sysPath);
+        const sysFm = sysExists ? (read(sysPath) || "").split("\n---\n")[0] : "";
+        const sysValid = /^colors:$/m.test(sysFm) && /^ {2}[a-z0-9.-]+: "#[0-9a-fA-F]{6}"$/m.test(sysFm);
+        const sysMentioned = agents.includes(b.system) || (read(join(app, "design", "README.md")) || "").includes(b.system);
+        const pass = sysExists && sysValid && sysMentioned;
+        rows.push({
+          check: `brand:${name}`,
+          pass,
+          note: pass
+            ? b.system
+            : !sysExists
+              ? `${b.system} missing — derive it`
+              : !sysValid
+                ? `${b.system} has no colour tokens in frontmatter`
+                : `${b.system} not referenced by AGENTS.md or design/README.md — unreachable`,
+        });
+      }
+    }
+  }
+
   // INFO: current drift counts, app-scoped.
   const scan = spawnSync(process.execPath, [join(__dirname, "scan.mjs"), app, "--json", "--only=color,palette"], {
     encoding: "utf8",
@@ -135,6 +184,8 @@ function checkApp(app, repoRoot) {
   rows.push({ check: "followed", pass: null, note: followedNote });
 
   let enforced = false;
+  let enforcedNote = "no workflow runs the scanner with --fail-on";
+  const relApp = relative(repoRoot, app).split(sep).join("/");
   const wfDir = join(repoRoot, ".github", "workflows");
   if (existsSync(wfDir)) {
     for (const e of readdirSync(wfDir)) {
@@ -147,6 +198,16 @@ function checkApp(app, repoRoot) {
       const runsScanner = /scan\.mjs/.test(wf) || /design-rails[^\n]*\bscan\b/.test(wf);
       if (runsScanner && /--fail-on=/.test(wf)) {
         enforced = true;
+        enforcedNote = "CI runs the scanner with budgets";
+        // @brand keys resolve their scope through brands.json — a file a
+        // later PR can quietly narrow. A plain parent floor for the app
+        // (apps/x:color=N, its scope a literal string in the reviewed CI
+        // file) bounds that move, so brand keys WITHOUT one get flagged.
+        if (relApp && wf.includes(`${relApp}@`) && !wf.includes(`${relApp}:`)) {
+          enforcedNote +=
+            ` — but @brand keys for ${relApp} have no ${relApp}:<detector> parent floor;` +
+            " a narrowed brands.json would un-fence them silently";
+        }
         break;
       }
     }
@@ -154,7 +215,7 @@ function checkApp(app, repoRoot) {
   rows.push({
     check: "enforced",
     pass: enforced,
-    note: enforced ? "CI runs the scanner with budgets" : "no workflow runs the scanner with --fail-on",
+    note: enforcedNote,
   });
   return rows;
 }

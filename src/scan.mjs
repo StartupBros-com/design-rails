@@ -113,6 +113,70 @@ const REGION_DETECTORS = ["color", "arbitrary", "palette"];
 let HIT_FILES = null; // set by analyse(); see the region-budget note there
 const regionCount = (id, region) =>
   HIT_FILES?.[id] === undefined ? undefined : HIT_FILES[id].filter((f) => f.startsWith(region + "/")).length;
+
+// Brand scopes (#9). A brand is rarely one directory: the case that forced
+// this was a funnel brand whose surfaces were individual FILES scattered
+// across shared component dirs — no directory-prefix budget could fence it.
+// design/brands.json (per app) is the machine-readable half of the brand
+// registry: { "<brand>": { "surfaces": ["dir-or-file", …],
+// "system": "design/<brand>/DESIGN.md" | null } }. system:null registers a
+// brand so its colours are ATTRIBUTED (not another brand's drift) before its
+// page ships. Budget keys reach brands with '@': `@<brand>:color=N` when
+// scanning the app itself, `<unit>@<brand>:color=N` from a workspace root.
+function loadBrands(appDir) {
+  const p = join(appDir, "design", "brands.json");
+  if (!existsSync(p)) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(p, "utf8"));
+  } catch (e) {
+    console.error(`design-drift: ${p} is not valid JSON (${e.message}) — a broken brand registry must not silently un-fence its brands`);
+    process.exit(2);
+  }
+  for (const [name, b] of Object.entries(parsed)) {
+    if (!Array.isArray(b?.surfaces) || b.surfaces.length === 0 || b.surfaces.some((s) => typeof s !== "string" || s === "")) {
+      console.error(`design-drift: brands.json brand '${name}' needs a non-empty surfaces array of paths`);
+      process.exit(2);
+    }
+    // Surfaces are normalized and MUST exist (as real files or dirs, not
+    // symlinks). Found by adversarial review: a single trailing slash made a
+    // surface match nothing, the brand tallied 0, and --tighten cemented the
+    // 0 as a forever-green ceiling — the exact silent un-fencing the loud-
+    // failure invariant forbids.
+    b.surfaces = b.surfaces.map((s) => s.replace(/^\.\//, "").replace(/\/+$/, ""));
+    for (const s of b.surfaces) {
+      if (s === "" || s.startsWith("/") || s.split("/").includes("..")) {
+        console.error(`design-drift: brands.json brand '${name}' surface '${s}' is degenerate — use app-relative paths`);
+        process.exit(2);
+      }
+      let st = null;
+      try {
+        st = lstatSync(join(appDir, s));
+      } catch {}
+      if (!st || (!st.isFile() && !st.isDirectory())) {
+        console.error(
+          `design-drift: brands.json brand '${name}' surface '${s}' does not exist under ${appDir}` +
+            " — a mistyped surface would tally nothing and always pass",
+        );
+        process.exit(2);
+      }
+    }
+    if (b.system !== null && typeof b.system !== "string") {
+      console.error(`design-drift: brands.json brand '${name}' needs system: <path> or null (registered, underived)`);
+      process.exit(2);
+    }
+  }
+  return parsed;
+}
+// A hit belongs to a surface that is a directory (prefix + "/") or the exact
+// file. Surfaces are app-relative; `rel` makes them scan-root-relative.
+const brandCount = (id, surfaces, rel) =>
+  HIT_FILES?.[id] === undefined
+    ? undefined
+    : HIT_FILES[id].filter((f) => surfaces.some((s) => {
+        const full = rel ? `${rel}/${s}` : s;
+        return f === full || f.startsWith(full + "/");
+      })).length;
 function parseBudgetKey(key, flag) {
   const at = key.lastIndexOf(":");
   const region = at === -1 ? null : key.slice(0, at).replace(/^\.\//, "").replace(/\/+$/, "");
@@ -132,6 +196,47 @@ function parseBudgetKey(key, flag) {
           `  count would be fiction. Region budgets: ${REGION_DETECTORS.join(", ")}.`,
       );
       process.exit(2);
+    }
+    // '@' names a brand from <unit>/design/brands.json (#9): `@hov:color=N`
+    // scanning the app itself, `apps/x@hov:color=N` from a workspace root.
+    // Every failure is loud — a missing registry or unknown brand must never
+    // become a budget that fences nothing.
+    if (region.includes("@")) {
+      // A directory literally containing '@' (pnpm/yarn scope-mirroring dirs
+      // like packages/@acme/ui) predates brand keys and wins: if the whole
+      // region exists as a real directory, it is a plain region, not a brand
+      // reference — pre-v0.4.0 configs keep working unchanged.
+      let literal = null;
+      try {
+        literal = lstatSync(join(root, region));
+      } catch {}
+      if (literal?.isDirectory()) return { region, id, brand: undefined };
+      const at2 = region.indexOf("@");
+      const unit = region.slice(0, at2).replace(/\/+$/, "");
+      const name = region.slice(at2 + 1);
+      const appDir = unit === "" ? root : join(root, unit);
+      if (unit !== "") {
+        let unitStat = null;
+        try {
+          unitStat = lstatSync(appDir);
+        } catch {}
+        if (!unitStat?.isDirectory()) {
+          console.error(`design-drift: ${flag} brand key '${region}' — unit '${unit}' is not a directory under ${root}`);
+          process.exit(2);
+        }
+      }
+      const brands = loadBrands(appDir);
+      if (!brands) {
+        console.error(`design-drift: ${flag} brand key '${region}' — no design/brands.json in ${appDir}`);
+        process.exit(2);
+      }
+      if (!brands[name]) {
+        console.error(
+          `design-drift: ${flag} brand key '${region}' — brand '${name}' is not in ${appDir}/design/brands.json (has: ${Object.keys(brands).join(", ")})`,
+        );
+        process.exit(2);
+      }
+      return { region, id, brand: { unit, name, surfaces: brands[name].surfaces } };
     }
     // A region that matches nothing budgets zero hits and passes forever.
     // Zero-run-green is the failure mode a ratchet exists to prevent, so every
@@ -175,7 +280,7 @@ function parseFailOn(raw) {
       );
       process.exit(2);
     }
-    const { region, id } = parseBudgetKey(k, "--fail-on");
+    const { region, id, brand } = parseBudgetKey(k, "--fail-on");
     const key = region === null ? id : `${region}:${id}`;
     // One key, one ceiling. v0.1.x silently kept the LAST duplicate; an
     // enforcement spec where two numbers claim the same key is a mistake
@@ -184,7 +289,7 @@ function parseFailOn(raw) {
       console.error(`design-drift: duplicate --fail-on key '${key}' — one key, one ceiling`);
       process.exit(2);
     }
-    per.push({ key, region, id, budget: Number(v) });
+    per.push({ key, region, id, brand, budget: Number(v) });
   }
   return { per };
 }
@@ -730,12 +835,30 @@ function analyse(files) {
     // var-fatal (svg-attr, string). Pre-sorts a migration before anyone greps.
     const contexts = {};
     for (const h of hits) contexts[h.ctx] = (contexts[h.ctx] || 0) + 1;
+    // Colour-dense files (#16): one file carrying most of the drift with
+    // hundreds of distinct values is almost never drift — it is a palette,
+    // theme registry, or data file (a real app hid 565 of 567 'drift' hits in
+    // its theme-exploration bench, and the residual clustering minted four
+    // phantom accents from it). The scanner cannot decide, but it can point.
+    const perFile = new Map();
+    for (const h of hits) {
+      const e = perFile.get(h.file) || { occurrences: 0, values: new Set() };
+      e.occurrences += 1;
+      e.values.add(h.value);
+      perFile.set(h.file, e);
+    }
+    // distinct > 100 already implies the file has 100+ hits, so no separate
+    // total-hits floor is needed (a floor here read as if it did work).
+    const denseFiles = [...perFile.entries()]
+      .filter(([, e]) => e.occurrences / hits.length > 0.5 && e.values.size > 100)
+      .map(([file, e]) => ({ file, occurrences: e.occurrences, distinct: e.values.size }));
     report.findings.color = {
       occurrences: hits.length,
       files: new Set(hits.map((h) => h.file)).size,
       distinct: distinct.size,
       vendorOccurrences: scope.vendor.color.length,
       contexts,
+      ...(denseFiles.length ? { denseFiles } : {}),
       top: ranked.slice(0, TOP).map(([value, e]) => ({ value, count: e.count })),
       examples: hits.slice(0, 5).map((h) => ({ at: `${h.file}:${h.line}`, text: h.text })),
       ...(FULL
@@ -859,6 +982,18 @@ function analyse(files) {
           ),
         ]),
       );
+      // Brand tallies (#9): units with a design/brands.json get `unit@brand`
+      // rows — the introduction numbers for @brand budget keys, file-shaped
+      // surfaces included.
+      for (const u of units) {
+        const brands = loadBrands(join(root, u));
+        if (!brands) continue;
+        for (const [name, b] of Object.entries(brands)) {
+          report.findings.workspace.regions[`${u}@${name}`] = Object.fromEntries(
+            Object.keys(HIT_FILES).map((id) => [id, brandCount(id, b.surfaces, u)]),
+          );
+        }
+      }
     }
   }
 
@@ -1039,6 +1174,12 @@ function render(r) {
       out.push(`  ${red(f.color.occurrences)} occurrences · ${f.color.files} files · ${yellow(f.color.distinct)} distinct values`);
       if (f.color.vendorOccurrences) out.push(dim(`  (+${f.color.vendorOccurrences} in vendored code — separate decision, not counted above)`));
       for (const t of f.color.top) out.push(`    ${String(t.count).padStart(5)}  ${t.value}`);
+      for (const d of f.color.denseFiles || []) {
+        out.push(
+          yellow(`  ⚠ ${d.file} holds ${d.occurrences} of the ${f.color.occurrences} hits (${d.distinct} distinct)`) +
+            dim(" — that is a palette/theme/data file, not drift: if its colours are content, mark it design-drift-ignore-file; if it declares your tokens, name it so the token-file detection matches"),
+        );
+      }
     }
     out.push("");
   }
@@ -1222,8 +1363,12 @@ if (tightenPath || bumpRaw !== null) {
     id === "orphan" ? report.findings.orphan?.unresolved : report.findings[id]?.occurrences;
   // Region keys read through the same tally the gate enforces, so tighten can
   // never write a number the gate would disagree with.
-  const actualFor = ({ key, region, id }) => {
-    const n = region === null ? measuredT(id) : regionCount(id, region);
+  const actualFor = ({ key, region, id, brand }) => {
+    const n = brand
+      ? brandCount(id, brand.surfaces, brand.unit)
+      : region === null
+        ? measuredT(id)
+        : regionCount(id, region);
     if (n === undefined) {
       console.error(`design-drift: budget names '${key}' but that detector did not run`);
       process.exit(2);
@@ -1394,8 +1539,12 @@ if (FAIL_ON !== null) {
       over.push(`total ${report.totalOccurrences} > ${FAIL_ON.total}`);
     }
   } else {
-    for (const { key, region, id, budget } of FAIL_ON.per) {
-      const n = region === null ? measured(id) : regionCount(id, region);
+    for (const { key, region, id, brand, budget } of FAIL_ON.per) {
+      const n = brand
+        ? brandCount(id, brand.surfaces, brand.unit)
+        : region === null
+          ? measured(id)
+          : regionCount(id, region);
       if (n === undefined) {
         console.error(`design-drift: budget names '${key}' but that detector did not run (--only/--skip?)`);
         process.exit(2);

@@ -31,7 +31,11 @@ a release — the bare npm name is unclaimed, so never `npx design-rails`).
 1. **Posture first.** `node src/posture.mjs <root>` — five checks per app
    (exists-at-scope / valid / wired / followed / enforced). The failing rows ARE
    the work list. A monorepo-root DESIGN.md counts as missing: a blend is a
-   system no app owns.
+   system no app owns. An app hosting several brands declares them in
+   `design/brands.json` (surfaces = dirs or files; `system: null` registers a
+   brand before it ships so its colours are attributed, not misread as
+   drift); posture then judges each brand, and fails an app whose top-level
+   DESIGN.md crowns one brand's primary over the others.
 2. **Derive where `exists` fails.** `node src/propose.mjs <app> --out=<app>/design`
    (`--mode=dark` when the brand identity lives in dark mode). Declared tokens
    win by NAME; residual literals fill gaps weighted by shipped (non-test) use.
@@ -54,7 +58,10 @@ a release — the bare npm name is unclaimed, so never `npx design-rails`).
    with `<region>:<detector>=<n>` keys (e.g. `apps/web:color=120`) so one
    app's cleanup ratchets without waiting on a sibling's backlog — the scan's
    `workspace.regions` tallies give the starting numbers, or add the key with
-   a generous ceiling and let `--tighten` snap it to the actual. The one
+   a generous ceiling and let `--tighten` snap it to the actual. Brands from
+   `design/brands.json` budget the same way with `@` keys
+   (`apps/x@time-to-rise:color=49`) — the only way to fence a brand whose
+   surfaces are files scattered across shared dirs. The one
    sanctioned raise is `--bump=<key>=<n> --reason="…"` (new vendored surface
    landing, and nothing else); hand-edited increases belong in their own
    reviewed PR.
