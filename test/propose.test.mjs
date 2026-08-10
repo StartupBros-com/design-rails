@@ -566,3 +566,72 @@ test("default (no --out) prints DESIGN.md to stdout and does not write files", (
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Brand mode (#18): the authoring half of brand scopes
+
+function seedBrandApp(root) {
+  write(root, "styles/theme.css", [
+    ":root {",
+    "  --color-alpha: #112233;",
+    "  --color-beta: #445566;",
+    "  --color-shared-ink: #0a0a0a;",
+    "}",
+  ].join("\n"));
+  write(root, "design/brands.json", JSON.stringify({
+    alpha: { surfaces: ["src/alpha"], system: "design/alpha/DESIGN.md", primary: "--color-alpha" },
+    beta: { surfaces: ["src/beta"], system: null },
+  }));
+  // alpha reaches its token by var(); its residuals are alpha-only.
+  write(root, "src/alpha/hero.tsx",
+    `export const H = () => <div style={{ color: 'var(--color-alpha)' }} data-x="#aa1111" />;`);
+  write(root, "src/alpha/cta.tsx", `const glow = "#aa1111"; const g2 = "#aa1112";`);
+  // beta reaches its token via the utility stem; its residuals differ.
+  write(root, "src/beta/page.tsx",
+    `export const B = () => <div className="bg-beta text-beta/80">{"#bb2222"}</div>;`);
+}
+
+test("an app with brands.json refuses an unscoped propose; --allow-blended overrides (#18)", () => {
+  withTemp((root) => {
+    seedBrandApp(root);
+    const r = propose(root);
+    assert.equal(r.status, 3);
+    assert.match(r.stderr, /registers 2 brands/);
+    assert.match(r.stderr, /--brand=<name>/);
+    const r2 = propose(root, "--allow-blended");
+    assert.notEqual(r2.status, 3, r2.stderr);
+  });
+});
+
+test("--brand derives from the brand's surfaces only, registry primary wins (#18)", () => {
+  withTemp((root) => {
+    seedBrandApp(root);
+    const r = propose(root, "--brand=alpha", "--write");
+    assert.equal(r.status, 0, r.stderr);
+    // Output defaults to the registered system's directory.
+    const md = readFileSync(join(root, "design/alpha/DESIGN.md"), "utf8");
+    assert.match(md, /primary: "#112233"/, "registry primary claims the role");
+    assert.match(md, /--color-alpha/, "evidence names the declared token");
+    assert.doesNotMatch(md, /#445566/, "beta's token never leaks into alpha");
+    assert.doesNotMatch(md, /#bb2222/, "beta's residuals never leak into alpha");
+    assert.match(md, /name: "alpha"/, "project name defaults to the brand");
+  });
+});
+
+test("--brand failure modes are loud: unknown brand, null system without --out, bad primary (#18)", () => {
+  withTemp((root) => {
+    seedBrandApp(root);
+    let r = propose(root, "--brand=nope");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not in design\/brands\.json/);
+    r = propose(root, "--brand=beta");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /system: null — pass --out/);
+    write(root, "design/brands.json", JSON.stringify({
+      alpha: { surfaces: ["src/alpha"], system: "design/alpha/DESIGN.md", primary: "--color-ghost" },
+    }));
+    r = propose(root, "--brand=alpha");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a declared, resolvable token/);
+  });
+});

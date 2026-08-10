@@ -111,6 +111,11 @@ ATTRIBUTED rather than counted as another brand's drift. Then:
   budgets fence them: `--fail-on=apps/x@time-to-rise:color=49` — file-shaped
   surfaces included, which no directory prefix could do
 - `tighten` and `bump` maintain `@brand` keys like any other
+- `propose --brand=<name>` derives ONE brand from exactly its surfaces —
+  and an app that registers brands REFUSES an unscoped derivation (the
+  blend is the poisoning the registry exists to prevent). A brand whose
+  namespaced token names the brand rather than a role (`--color-hov`)
+  declares it in the registry: `"primary": "--color-hov"`.
 
 Two rules keep the registry honest: surfaces must EXIST (a typo'd path
 hard-errors instead of tallying zero forever), and `@brand` keys belong

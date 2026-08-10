@@ -26,7 +26,7 @@ if (!verb || !(verb in VERBS)) {
 usage:
   design-rails posture <app-or-workspace-root>   five-check pass/fail table
   design-rails scan <root> [--json] [--fail-on=…] drift measurement + CI gate
-  design-rails propose <app> [--mode=dark] [--out=design/]  author DESIGN.md + tokens
+  design-rails propose <app> [--mode=dark] [--brand=<name>] [--out=design/]  author DESIGN.md + tokens
   design-rails decide <app> [--record slug=option]          visual decision pages
   design-rails tighten <budgets-file> [root]     lower CI budgets to actuals
   design-rails bump <key>=<n> <budgets-file> [root] --reason="…"
