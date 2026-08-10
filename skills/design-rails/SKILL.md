@@ -3,8 +3,9 @@ name: design-rails
 description: >-
   Guardrails that keep AI agents on the project's design system. Use when asked
   to check design-system posture, author a DESIGN.md from an existing codebase,
-  settle open design decisions from rendered option pages, or tighten drift
-  budgets in CI.
+  settle open design decisions from rendered option pages, wire an app's agent
+  instructions to its DESIGN.md, migrate colour literals onto tokens, or
+  tighten drift budgets in CI.
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
@@ -42,7 +43,11 @@ a release — the bare npm name is unclaimed, so never `npx design-rails`).
 4. **Wire where `wired` fails.** The app's agent instructions (AGENTS.md /
    CLAUDE.md) must name `design/DESIGN.md` as the styling source of truth — an
    unwired DESIGN.md is inert.
-5. **Enforce where `enforced` fails.** CI runs
+5. **Migrate where `followed` fails — only on the human's order.** Follow
+   `references/migration.md`: the substitution differs per context class
+   (`findings.color.sites[].ctx` in the scan), two classes are var-fatal, and
+   done means the four-point proof checklist, not a green build.
+6. **Enforce where `enforced` fails.** CI runs
    `node src/scan.mjs . --fail-on=<per-detector budgets>`; after every cleanup,
    `node src/scan.mjs <root> --tighten=<workflow-file>` lowers the budgets.
    The ratchet refuses to absorb an increase. In a monorepo, budget per app
