@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -128,5 +128,29 @@ test("no design/REVIEW.md exits 2; no open decisions exits 0 quietly", () => {
     const r = decide(root);
     assert.equal(r.status, 0);
     assert.match(r.stdout, /no open decisions/);
+  });
+});
+
+test("an open decision with zero parsed options refuses loudly (dogfood catch)", () => {
+  // The first real-world run authored options as `- **own-token:** …` — no
+  // literal "Option" — and decide wrote three empty pages with exit 0. A page
+  // with no options is unusable; the slip must be loud, and the message must
+  // teach the grammar.
+  withApp((root) => {
+    write(
+      root,
+      "design/REVIEW.md",
+      [
+        "### Decision: cta lime [open]",
+        "- **own-token:** name it action.cta #c4ff0e",
+        "- **collapse:** fold into #39ff14",
+      ].join("\n"),
+    );
+    const r = decide(root);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /ZERO options/);
+    assert.match(r.stderr, /cta lime/);
+    assert.match(r.stderr, /\*\*Option <name>:\*\*/);
+    assert.ok(!existsSync(join(root, "design", "decisions", "cta-lime.html")), "no empty page written");
   });
 });

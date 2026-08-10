@@ -216,6 +216,20 @@ if (!decisions.length) {
   console.log("design-drift decide: no open decisions — nothing to render.");
   process.exit(0);
 }
+// An [open] decision whose options did not parse is a formatting slip, and a
+// page with zero options is unusable — the first dogfood run wrote three of
+// them with a clean exit because the author dropped the literal word
+// "Option". Refuse loudly instead; the human sees the grammar, not a shrug.
+const optionless = decisions.filter((d) => d.options.length === 0);
+if (optionless.length) {
+  console.error(
+    `design-drift decide: ${optionless.length} open decision(s) parsed ZERO options:\n` +
+      optionless.map((d) => `    ### Decision: ${d.title}`).join("\n") +
+      "\n  options must match:  - **Option <name>:** <description with #hex>\n" +
+      "  (the literal word 'Option' is part of the grammar)",
+  );
+  process.exit(2);
+}
 const ctx = appContext();
 mkdirSync(outDir, { recursive: true });
 for (const d of decisions) {
