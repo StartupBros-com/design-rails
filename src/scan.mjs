@@ -36,6 +36,7 @@
   fixing it gets reverted on the next paste.
 */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 
@@ -253,6 +254,35 @@ const HEX = /#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{4}|[0-9a-fA-F]{3})(?![0
  *  stripping catches them everywhere except inside a string. */
 const isNumericReference = (body) => body.length === 4 && !/[a-f]/i.test(body);
 const FUNC_COLOR = /\b(rgba?|hsla?)\(\s*[0-9.]/g;
+
+// Context class per colour hit (#10). The safe migration substitution differs
+// per class, and two classes are var-FATAL: an SVG presentation attribute
+// (`fill="var(--x)"` is invalid and paints black) and any string a component
+// does math on (canvas fillStyle, hex+alpha concat) — those need consumer
+// changes, not call-site substitution. Line-based heuristics, deliberately
+// coarse: the tag pre-sorts a migration plan; references/migration.md in the
+// skill carries the per-class recipes and caveats. Checked most-specific
+// first.
+// Both spellings per attribute: hyphenated (HTML/SVG source) AND camelCase —
+// React requires stopColor/floodColor/lightingColor in JSX, which is exactly
+// where SVG gradients get authored (found by adversarial review: the
+// hyphen-only pattern made svg-attr dead code for those three in .tsx).
+const SVG_PAINT_ATTR =
+  /(?:fill|stroke|stop-color|stopColor|flood-color|floodColor|lighting-color|lightingColor)\s*=\s*["']$/;
+function classifyContext(line, idx) {
+  const before = line.slice(0, idx);
+  if (/-\[[^\]]*$/.test(before)) return "utility"; // Tailwind arbitrary: -[#hex]/N → -token/N
+  if (SVG_PAINT_ATTR.test(before)) return "svg-attr"; // var() invalid — needs CSS fill or component change
+  if (/\bstyle\s*=\s*(?:["'][^"']*|\{\{[^}]*)$/.test(before)) return "style-attr"; // inline style → var()
+  if (/[{,(\s][\w-]+\s*:\s*["'`]?[^;{}"'`]*$/.test(before)) return "css-value"; // CSS decl / style object → var()
+  // `prop` means a JSX/HTML attribute, so it requires an OPEN TAG on the line
+  // (`<Tag attr="` — a `<` with no closing `>` after it). Without that,
+  // `ident='#hex'` is a JS assignment (`ctx.fillStyle='…'`, `let bg='…'`)
+  // whose consumers may do string math — the read-the-consumer class.
+  if (/[A-Za-z][\w-]*=["']$/.test(before) && /<[A-Za-z][^>]*$/.test(before)) return "prop";
+  if (/["'`]/.test(before.slice(-40))) return "string"; // bare string/template — assume the code does math on it
+  return "other";
+}
 // Tailwind arbitrary value with a unit-bearing number: text-[14px], p-[1.5rem].
 // Requires a leading boundary so `data-[state=open]` and `w-[var(--x)]` miss.
 const ARBITRARY = /(?:^|[\s"'`:])(-?[a-z]+(?:-[a-z]+)*)-\[(-?\d*\.?\d+)(px|rem|em|%)\]/g;
@@ -525,10 +555,25 @@ function scanFile(abs) {
     if (!isTokenFile && !off("color") && !TOKEN_CTX.test(code)) {
       for (const m of code.matchAll(HEX)) {
         if (isNumericReference(m[1])) continue;
-        hits.color.push({ line: i + 1, value: `#${m[1].toLowerCase()}`, kind: "hex", test: isTestFile, text: line.trim().slice(0, 120) });
+        hits.color.push({
+          line: i + 1,
+          value: `#${m[1].toLowerCase()}`,
+          kind: "hex",
+          // classify against the comment-stripped text the match indexes into
+          ctx: classifyContext(code, m.index),
+          test: isTestFile,
+          text: line.trim().slice(0, 120),
+        });
       }
       for (const m of code.matchAll(FUNC_COLOR)) {
-        hits.color.push({ line: i + 1, value: m[1].toLowerCase() + "()", kind: "func", test: isTestFile, text: line.trim().slice(0, 120) });
+        hits.color.push({
+          line: i + 1,
+          value: m[1].toLowerCase() + "()",
+          kind: "func",
+          ctx: classifyContext(code, m.index),
+          test: isTestFile,
+          text: line.trim().slice(0, 120),
+        });
       }
     }
     if (isTokenFile) {
@@ -680,14 +725,27 @@ function analyse(files) {
       distinct.set(h.value, e);
     }
     const ranked = [...distinct.entries()].sort((a, b) => b[1].count - a[1].count);
+    // Context-class tallies (#10): how much of the drift is one-substitution
+    // work (utility, css-value, style-attr) vs consumer-dependent (prop) vs
+    // var-fatal (svg-attr, string). Pre-sorts a migration before anyone greps.
+    const contexts = {};
+    for (const h of hits) contexts[h.ctx] = (contexts[h.ctx] || 0) + 1;
     report.findings.color = {
       occurrences: hits.length,
       files: new Set(hits.map((h) => h.file)).size,
       distinct: distinct.size,
       vendorOccurrences: scope.vendor.color.length,
+      contexts,
       top: ranked.slice(0, TOP).map(([value, e]) => ({ value, count: e.count })),
       examples: hits.slice(0, 5).map((h) => ({ at: `${h.file}:${h.line}`, text: h.text })),
-      ...(FULL ? { all: ranked.map(([value, e]) => ({ value, count: e.count, shipped: e.shipped })) } : {}),
+      ...(FULL
+        ? {
+            all: ranked.map(([value, e]) => ({ value, count: e.count, shipped: e.shipped })),
+            // FULL only: the per-hit migration plan — every site with its
+            // context class, ready to sort by file or by class.
+            sites: hits.map((h) => ({ file: h.file, line: h.line, value: h.value, ctx: h.ctx })),
+          }
+        : {}),
     };
   }
 
@@ -1039,6 +1097,45 @@ function render(r) {
     out.push("");
   }
 
+  // Per-unit tallies (#14): the numbers an operator copies when introducing a
+  // region budget — previously JSON-only, which forced a --json detour.
+  if (f.workspace?.regions && Object.keys(f.workspace.regions).length) {
+    out.push(bold("workspace regions") + dim("  (per-unit counts — region-budget introduction numbers)"));
+    for (const [unit, counts] of Object.entries(f.workspace.regions)) {
+      const cells = Object.entries(counts)
+        .map(([id, n]) => `${id} ${n}`)
+        .join(" · ");
+      out.push(`  ${cyan(unit)}  ${cells}`);
+    }
+    out.push("");
+  }
+
+  // Migration triage (#10): what kind of work the colour drift actually is.
+  if (f.color?.contexts && f.color.occurrences) {
+    const c = f.color.contexts;
+    const order = ["utility", "css-value", "style-attr", "prop", "string", "svg-attr", "other"];
+    const line = order.filter((k) => c[k]).map((k) => `${k} ${c[k]}`).join(" · ");
+    out.push(dim(`colour contexts: ${line}`));
+    const careful = (c["svg-attr"] || 0) + (c.string || 0) + (c.prop || 0) + (c.other || 0);
+    if (careful) {
+      out.push(
+        dim(
+          `  ⚠ ${careful} sites are NOT plain var() substitutions — svg attributes reject var();` +
+            ` strings, props and unclassified sites depend on the consumer (canvas, concatenation)`,
+        ),
+      );
+    }
+    out.push("");
+  }
+
+  if (r.git) {
+    out.push(
+      dim(
+        `measured ${r.root} @ ${r.git.sha}${r.git.dirty ? ` (+${r.git.dirty} uncommitted)` : ""}` +
+          (r.git.inProgress ? "  ⚠ rebase/merge IN PROGRESS — is this the tree you mean?" : ""),
+      ),
+    );
+  }
   out.push(dim("Every hit is a lead. Confirm at the file:line before changing anything."));
   return out.join("\n");
 }
@@ -1063,9 +1160,31 @@ if (!stat.isDirectory()) {
   process.exit(2);
 }
 
+// A measurement that names its input cannot be silently pointed at the wrong
+// tree (#11): budgets were once tightened against a mid-rebase tree whose
+// real edits sat in an autostash, and nothing in the output said so.
+function gitState(dir) {
+  const run = (...a) => {
+    const r = spawnSync("git", ["-C", dir, ...a], { encoding: "utf8" });
+    return r.status === 0 ? r.stdout.trim() : null;
+  };
+  const sha = run("rev-parse", "--short", "HEAD");
+  if (sha === null) return null;
+  const dirty = (run("status", "--porcelain") || "").split("\n").filter(Boolean).length;
+  const gitDir = run("rev-parse", "--git-dir");
+  const inProgress =
+    gitDir !== null &&
+    ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"].some((f) =>
+      existsSync(join(resolve(dir, gitDir), f)),
+    );
+  return { sha, dirty, inProgress };
+}
+
 const report = analyse(walk(root).map(scanFile));
 report.totalOccurrences = ["color", "arbitrary", "palette"]
   .reduce((n, k) => n + (report.findings[k]?.occurrences || 0), 0);
+const git = gitState(root);
+if (git) report.git = git;
 console.log(asJson ? JSON.stringify(report, null, 2) : render(report));
 
 // --tighten=<file>: the one-way ratchet as a command. Reads the file's
@@ -1083,6 +1202,22 @@ const bumpRaw = (() => {
   return a ? a.slice("--bump=".length) : null;
 })();
 if (tightenPath || bumpRaw !== null) {
+  // The ratchet writes numbers into a reviewed file — it must say what tree
+  // produced them, and a mid-operation tree is almost never the one you mean.
+  // Provenance goes to STDOUT (a successful tighten stays stderr-silent, for
+  // wrappers that treat any stderr as failure); the warning is stderr's job.
+  if (report.git) {
+    const g = report.git;
+    console.log(
+      `design-drift: measuring ${root} @ ${g.sha}${g.dirty ? ` (+${g.dirty} uncommitted)` : ""}`,
+    );
+    if (g.inProgress) {
+      console.error(
+        "design-drift: WARNING — a rebase/merge is IN PROGRESS in this tree; " +
+          "actuals measured now may not include the changes you think are here.",
+      );
+    }
+  }
   const measuredT = (id) =>
     id === "orphan" ? report.findings.orphan?.unresolved : report.findings[id]?.occurrences;
   // Region keys read through the same tally the gate enforces, so tighten can

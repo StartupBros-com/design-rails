@@ -1095,6 +1095,94 @@ test("two sibling region budgets tighten independently in one run (#2 criterion 
   });
 });
 
+// ---------------------------------------------------------------------------
+// v0.3.0 migration support: context classes (#10), provenance (#11),
+// regions in the human render (#14)
+
+test("colour hits carry a context class; the classes pre-sort a migration (#10)", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/kitchen.tsx",
+      [
+        `export const A = () => <div className="text-[#ff0001]/80" />;`,
+        `export const B = () => <svg><path fill="#ff0002" /></svg>;`,
+        `export const C = () => <div style={{ background: '#ff0003' }} />;`,
+        `export const D = () => <Widget accent="#ff0004" />;`,
+        `const ACCENT = '#ff0005';`,
+        `export const E = () => <svg><stop stopColor="#ff0007" /></svg>;`,
+        `ctx.fillStyle='#ff0008';`,
+        `let bg='#ff0009';`,
+      ].join("\n"),
+    );
+    write(root, "src/plain.css", `.x {\n  color: #ff0006;\n}\n`);
+    const r = scan(root, "--full");
+    const byValue = Object.fromEntries(r.findings.color.sites.map((s) => [s.value, s.ctx]));
+    assert.equal(byValue["#ff0001"], "utility");
+    assert.equal(byValue["#ff0002"], "svg-attr", "svg paint attribute — var() is invalid there");
+    assert.equal(byValue["#ff0003"], "style-attr");
+    assert.equal(byValue["#ff0004"], "prop");
+    assert.equal(byValue["#ff0005"], "string", "a spaced JS assignment is consumer-math territory, not a prop");
+    assert.equal(byValue["#ff0006"], "css-value");
+    // Adversarial-review class: the dangerous direction is a var-fatal site
+    // tagged as something safe.
+    assert.equal(byValue["#ff0007"], "svg-attr", "React camelCase stopColor is still an SVG paint attribute");
+    assert.equal(byValue["#ff0008"], "string", "canvas fillStyle assignment is not a JSX prop");
+    assert.equal(byValue["#ff0009"], "string", "a no-space JS assignment outside a tag is not a prop");
+    // The summary tallies match the sites.
+    const sum = Object.values(r.findings.color.contexts).reduce((a, b) => a + b, 0);
+    assert.equal(sum, r.findings.color.occurrences);
+    // The human render calls out the var-fatal classes.
+    const human = spawnSync(process.execPath, [scriptPath, root, "--no-color"], { encoding: "utf8" });
+    assert.match(human.stdout, /colour contexts:/);
+    assert.match(human.stdout, /NOT plain var\(\) substitutions/);
+  });
+});
+
+test("the report names the tree it measured (#11)", () => {
+  withTempProject((root) => {
+    write(root, "src/a.tsx", `const a = "#123456";`);
+    // Not a git repo: no git block, no crash.
+    let r = scan(root);
+    assert.equal(r.git, undefined);
+    // A real repo: sha + dirty ride the report.
+    const g = (...a) => spawnSync("git", ["-C", root, ...a], { encoding: "utf8" });
+    g("init", "-q");
+    g("config", "user.email", "t@t");
+    g("config", "user.name", "t");
+    g("add", "-A");
+    g("commit", "-qm", "x");
+    r = scan(root);
+    assert.match(r.git.sha, /^[0-9a-f]{4,}$/);
+    assert.equal(r.git.dirty, 0);
+    write(root, "src/b.tsx", `const b = 1;`);
+    r = scan(root);
+    assert.ok(r.git.dirty >= 1, "uncommitted files are counted");
+    // Mid-merge: tighten warns that the tree may not be what you think.
+    write(root, "ci.yml", "run: node scan.mjs . --fail-on=color=99\n");
+    writeFileSync(join(root, ".git", "MERGE_HEAD"), "0".repeat(40));
+    const t = spawnSync(process.execPath, [scriptPath, root, `--tighten=${join(root, "ci.yml")}`], {
+      encoding: "utf8",
+    });
+    assert.equal(t.status, 0, t.stderr);
+    assert.match(t.stderr, /IN PROGRESS/);
+    // Provenance rides STDOUT: a successful tighten stays stderr-silent apart
+    // from real warnings, for wrappers that treat any stderr as failure.
+    assert.match(t.stdout, /measuring .* @ [0-9a-f]/);
+  });
+});
+
+test("workspace region tallies appear in the human render (#14)", () => {
+  withTempProject((root) => {
+    writeTwoAppWorkspace(root);
+    const r = spawnSync(process.execPath, [scriptPath, root, "--no-color"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /workspace regions/);
+    assert.match(r.stdout, /apps\/web\s+.*color 2/);
+    assert.match(r.stdout, /apps\/web2\s+.*color 3/);
+  });
+});
+
 test("--bump persists its reason as a dated comment above the budget's command", () => {
   withTempProject((root) => {
     writeTwoAppWorkspace(root);
