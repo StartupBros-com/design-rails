@@ -29,6 +29,7 @@
     node scan.mjs <repo> --json --full | node propose.mjs --stdin
     node propose.mjs <repo> --out=design/    # write files (default: print only)
     node propose.mjs <repo> --name=myapp    # project name in the header
+    node propose.mjs <app> --brand=<name>    # one brand from design/brands.json (#18)
     node propose.mjs <repo> --clusters=N     # target colour-cluster count
 
   It NEVER edits application source. It only writes under --out when asked, and
@@ -36,18 +37,18 @@
 */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const fromStdin = args.includes("--stdin");
-const outDir = (() => {
+let outDir = (() => {
   const a = args.find((x) => x.startsWith("--out="));
   return a ? a.slice("--out=".length) : null;
 })();
-const projectName = (() => {
+let projectName = (() => {
   const a = args.find((x) => x.startsWith("--name="));
   return a ? a.slice("--name=".length) : "project";
 })();
@@ -71,6 +72,73 @@ const themeMode = (() => {
 })();
 const allowBlended = args.includes("--allow-blended");
 const root = resolve(args.find((a) => !a.startsWith("-")) || ".");
+
+// Brand mode (#18): the authoring half of brand scopes. design/brands.json
+// (same registry scan and posture read) names each brand's surfaces; propose
+// derives ONE brand from exactly those files. An app that registers brands
+// REFUSES an unscoped derivation — a blend over a declared multi-brand app is
+// the cross-brand poisoning the registry exists to prevent.
+const brandName = (() => {
+  const a = args.find((x) => x.startsWith("--brand="));
+  return a ? a.slice("--brand=".length) : null;
+})();
+const brandsRegistry = (() => {
+  const p = join(root, "design", "brands.json");
+  let raw;
+  try {
+    raw = readFileSync(p, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.error(`design-drift propose: ${p} is not valid JSON (${e.message})`);
+    process.exit(2);
+  }
+  for (const [n, b] of Object.entries(parsed)) {
+    if (!Array.isArray(b?.surfaces) || b.surfaces.length === 0) {
+      console.error(`design-drift propose: brands.json brand '${n}' needs a non-empty surfaces array`);
+      process.exit(2);
+    }
+    b.surfaces = b.surfaces.map((x) => String(x).replace(/^\.\//, "").replace(/\/+$/, ""));
+  }
+  return parsed;
+})();
+let brand = null;
+if (brandName !== null) {
+  if (!brandsRegistry) {
+    console.error(`design-drift propose: --brand needs design/brands.json under ${root}`);
+    process.exit(2);
+  }
+  brand = brandsRegistry[brandName];
+  if (!brand) {
+    console.error(
+      `design-drift propose: brand '${brandName}' is not in design/brands.json (has: ${Object.keys(brandsRegistry).join(", ")})`,
+    );
+    process.exit(2);
+  }
+  if (!outDir) {
+    if (!brand.system) {
+      console.error(
+        `design-drift propose: brand '${brandName}' has system: null — pass --out=<dir>, or set its system path in brands.json first`,
+      );
+      process.exit(2);
+    }
+    outDir = join(root, dirname(brand.system));
+  }
+  if (projectName === "project") projectName = brandName;
+} else if (brandsRegistry && !allowBlended) {
+  console.error(
+    `design-drift propose: this app registers ${Object.keys(brandsRegistry).length} brands (${Object.keys(brandsRegistry).join(", ")}) —\n` +
+      "  an unscoped derivation would blend them, which is exactly the cross-brand\n" +
+      "  poisoning the registry exists to prevent. Derive per brand:\n" +
+      "    propose <app> --brand=<name>\n" +
+      "  or insist with --allow-blended.",
+  );
+  process.exit(3);
+}
 
 // ---------------------------------------------------------------- colour math
 // OKLab (Björn Ottosson) — perceptually uniform, so "close" means "looks close".
@@ -930,18 +998,75 @@ function loadReport() {
 }
 
 const report = loadReport();
-const colorAll = (report.findings.color?.all || []).filter((c) => /^#[0-9a-fA-F]{3,8}$/.test(c.value));
-const scales = report.findings.scale?.clusters || [];
-const paletteHues = report.findings.palette?.allHues || report.findings.palette?.hues || [];
+let colorAll = (report.findings.color?.all || []).filter((c) => /^#[0-9a-fA-F]{3,8}$/.test(c.value));
+let scales = report.findings.scale?.clusters || [];
+let paletteHues = report.findings.palette?.allHues || report.findings.palette?.hues || [];
 const declaredAll = (report.findings.declaredTokens || []).filter((d) => d.hex);
-const declaredTokens = declaredAll.filter((d) => (d.mode || "light") === themeMode);
+let declaredTokens = declaredAll.filter((d) => (d.mode || "light") === themeMode);
+
+if (brand) {
+  // Residuals: only hits on this brand's surfaces, re-aggregated from the
+  // per-hit sites (scan --full) with shipped weights rebuilt from test flags.
+  const inSurfaces = (f) => brand.surfaces.some((sf) => f === sf || f.startsWith(sf + "/"));
+  const agg = new Map();
+  for (const site of report.findings.color?.sites || []) {
+    if (!/^#[0-9a-fA-F]{3,8}$/.test(site.value) || !inSurfaces(site.file)) continue;
+    const e = agg.get(site.value) || { count: 0, shipped: 0 };
+    e.count += 1;
+    if (!site.test) e.shipped += 1;
+    agg.set(site.value, e);
+  }
+  colorAll = [...agg.entries()].map(([value, e]) => ({ value, count: e.count, shipped: e.shipped }));
+  // Declared tokens live at APP level (theme files sit outside any brand's
+  // surfaces), so eligibility is IN-SCOPE USAGE, not location: the brand must
+  // reach the token by name — var(--x) or its Tailwind utility stem — inside
+  // its own surfaces. Value-matching cannot work here: a fully migrated brand
+  // has no literals left, only references.
+  const surfaceText = brand.surfaces
+    .map((sf) => {
+      const stack = [join(root, sf)];
+      let text = "";
+      while (stack.length) {
+        const cur = stack.pop();
+        let st;
+        try {
+          st = statSync(cur);
+        } catch {
+          continue;
+        }
+        if (st.isFile()) {
+          try {
+            text += readFileSync(cur, "utf8") + "\n";
+          } catch {}
+        } else if (st.isDirectory()) {
+          for (const e of readdirSync(cur)) if (e !== "node_modules") stack.push(join(cur, e));
+        }
+      }
+      return text;
+    })
+    .join("\n");
+  const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const usedInScope = (name) => {
+    if (new RegExp(`var\\(\\s*${escRe(name)}(?![\\w-])`).test(surfaceText)) return true;
+    if (name.startsWith("--color-")) {
+      const stem = name.slice("--color-".length);
+      if (new RegExp(`[a-z]+-${escRe(stem)}(?![\\w-])`).test(surfaceText)) return true;
+    }
+    return false;
+  };
+  declaredTokens = declaredTokens.filter((d) => usedInScope(d.name));
+  // Scales and palette pressure are app-shell measurements; a brand file
+  // carries identity, not the shell.
+  scales = [];
+  paletteHues = [];
+}
 
 // Workspace refusal (#272): a monorepo with two or more independently-themed
 // units gets NO blended DESIGN.md — the blend is a system no app owns (the
 // dogfood run named a 45-file side app's navy as a 10-app monorepo's brand).
 // Point the proposer at one app, or pass --allow-blended to insist.
 const ws = report.findings.workspace;
-if (ws?.detected && !allowBlended) {
+if (ws?.detected && !allowBlended && !brand) {
   const unitOf = (f) => {
     const m = (f || "").match(/^((apps|packages)\/[^/]+)\//);
     return m ? m[1] : null;
@@ -977,6 +1102,37 @@ if (colorAll.length < 4 && scales.length === 0 && declaredTokens.length === 0) {
 
 const clusters = shippedColors.length ? clusterColors(shippedColors, clusterTarget) : [];
 const declaredRoles = assignDeclaredRoles(declaredTokens);
+// A brand's namespaced token names the BRAND, not a role ("--color-hov" says
+// nothing the role matcher can read, and 'hov' abbreviates 'house-of-vibe' —
+// no heuristic bridges that honestly). The registry does, explicitly:
+// brands.json may declare `"primary": "--color-hov"`, and that token IS the
+// brand's primary. Loud when it names nothing declared or unresolvable.
+if (brand?.primary) {
+  const tok =
+    declaredAll.find((d) => d.name === brand.primary && (d.mode || "light") === themeMode) ||
+    declaredAll.find((d) => d.name === brand.primary);
+  if (!tok) {
+    console.error(
+      `design-drift propose: brands.json primary '${brand.primary}' is not a declared, resolvable token in this app's theme files`,
+    );
+    process.exit(2);
+  }
+  const rgb = hexToRgb(tok.hex);
+  if (!rgb) {
+    console.error(`design-drift propose: brands.json primary '${brand.primary}' resolves to '${tok.hex}', which is not clusterable`);
+    process.exit(2);
+  }
+  const lab = rgbToOklab(rgb);
+  declaredRoles.primary = {
+    hex: tok.hex,
+    count: tok.refs,
+    members: [{ hex: tok.hex, count: tok.refs }],
+    lab,
+    chroma: Math.hypot(lab.a, lab.b),
+    hue: Math.atan2(lab.b, lab.a),
+    declared: { name: tok.name, file: tok.file, refs: tok.refs, raw: tok.raw },
+  };
+}
 const roles = assignRoles(clusters, declaredRoles);
 // The other mode's divergent role declarations are surfaced, not hidden: a
 // --mode=light run of a dark-identity brand must SAY the dark system exists.

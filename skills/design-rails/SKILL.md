@@ -39,7 +39,11 @@ a release — the bare npm name is unclaimed, so never `npx design-rails`).
 2. **Derive where `exists` fails.** `node src/propose.mjs <app> --out=<app>/design`
    (`--mode=dark` when the brand identity lives in dark mode). Declared tokens
    win by NAME; residual literals fill gaps weighted by shipped (non-test) use.
-   The proposer refuses blended monorepo output — run per app.
+   The proposer refuses blended monorepo output — run per app — and an app
+   with `design/brands.json` refuses an unscoped run the same way: derive
+   per brand with `--brand=<name>` (output defaults to the brand's system
+   dir; a brand-named token like `--color-hov` claims primary via the
+   registry's `"primary"` field).
 3. **Settle what it flags.** `node src/decide.mjs <app>` renders each open
    decision in `design/REVIEW.md` as a self-contained HTML page — options side
    by side on the app's real canvas. Human picks; record with

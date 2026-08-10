@@ -866,7 +866,7 @@ function analyse(files) {
             all: ranked.map(([value, e]) => ({ value, count: e.count, shipped: e.shipped })),
             // FULL only: the per-hit migration plan — every site with its
             // context class, ready to sort by file or by class.
-            sites: hits.map((h) => ({ file: h.file, line: h.line, value: h.value, ctx: h.ctx })),
+            sites: hits.map((h) => ({ file: h.file, line: h.line, value: h.value, ctx: h.ctx, test: h.test })),
           }
         : {}),
     };
