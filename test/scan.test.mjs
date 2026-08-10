@@ -956,6 +956,140 @@ test("--bump is the one sanctioned raise: reason required, target validated, fil
   });
 });
 
+// ---------------------------------------------------------------------------
+// Brand scopes (#9): brands.json, @brand budget keys, file-shaped surfaces
+
+function writeBrandFactory(root) {
+  write(root, "pnpm-workspace.yaml", "packages:\n  - apps/*\n");
+  write(root, "apps/factory/package.json", `{"name":"factory"}`);
+  write(
+    root,
+    "apps/factory/design/brands.json",
+    JSON.stringify({
+      neo: { surfaces: ["src/neo"], system: "design/neo/DESIGN.md" },
+      // The case that forced brand scopes: surfaces that are FILES scattered
+      // through shared dirs — no directory prefix can fence them.
+      ttr: { surfaces: ["src/shared/TtrHero.tsx", "src/shared/TtrCta.tsx"], system: null },
+    }),
+  );
+  write(root, "apps/factory/src/neo/a.tsx", `const a = "#101010"; const b = "#101011";`);
+  write(root, "apps/factory/src/shared/TtrHero.tsx", `const c = "#202020"; const d = "#202021";`);
+  write(root, "apps/factory/src/shared/TtrCta.tsx", `const e = "#202022";`);
+  write(root, "apps/factory/src/shared/other.tsx", `const f = "#303030";`);
+}
+
+test("@brand budgets fence dir-shaped AND file-shaped brands (#9)", () => {
+  withTempProject((root) => {
+    writeBrandFactory(root);
+    // From the workspace root: unit@brand.
+    let r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/factory@neo:color=2,apps/factory@ttr:color=3"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/factory@ttr:color=2"], { encoding: "utf8" });
+    assert.equal(r.status, 1, "three file-shaped hits exceed a budget of 2");
+    assert.match(r.stderr, /apps\/factory@ttr:color 3 > 2/);
+    // From the app root itself: bare @brand.
+    r = spawnSync(process.execPath, [scriptPath, join(root, "apps/factory"), "--fail-on=@neo:color=2"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    // The shared-but-unattributed hit belongs to NO brand: both brands
+    // together fence 5 of the 6 hits, the app total still sees 6.
+    r = spawnSync(process.execPath, [scriptPath, join(root, "apps/factory"), "--fail-on=color=5"], { encoding: "utf8" });
+    assert.equal(r.status, 1);
+  });
+});
+
+test("brand-key failures are loud: unknown brand, missing or broken registry (#9)", () => {
+  withTempProject((root) => {
+    writeBrandFactory(root);
+    let r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/factory@nope:color=0"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /brand 'nope' is not in/);
+    write(root, "apps/other/package.json", `{"name":"other"}`);
+    write(root, "apps/other/src/a.tsx", `const a = 1;`);
+    r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/other@x:color=0"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /no design\/brands\.json/);
+    write(root, "apps/factory/design/brands.json", "{not json");
+    r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/factory@neo:color=0"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not valid JSON/);
+  });
+});
+
+test("--tighten maintains @brand keys; workspace.regions carries unit@brand tallies (#9)", () => {
+  withTempProject((root) => {
+    writeBrandFactory(root);
+    const r = scan(root);
+    assert.equal(r.findings.workspace.regions["apps/factory@neo"].color, 2);
+    assert.equal(r.findings.workspace.regions["apps/factory@ttr"].color, 3, "file-shaped surfaces tally");
+    write(root, "ci.yml", "      node scan.mjs . --fail-on=color=99,apps/factory@ttr:color=99\n");
+    const ci = join(root, "ci.yml");
+    const t = spawnSync(process.execPath, [scriptPath, root, `--tighten=${ci}`], { encoding: "utf8" });
+    assert.equal(t.status, 0, t.stderr);
+    assert.match(readFileSync(ci, "utf8"), /--fail-on=color=6,apps\/factory@ttr:color=3/);
+  });
+});
+
+test("degenerate or missing surfaces hard-error — never a zero-tally fence (adversarial)", () => {
+  withTempProject((root) => {
+    writeBrandFactory(root);
+    // Trailing slash NORMALIZES (innocent typo), still fences.
+    write(
+      root,
+      "apps/factory/design/brands.json",
+      JSON.stringify({ neo: { surfaces: ["src/neo/"], system: null } }),
+    );
+    let r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/factory@neo:color=1"], { encoding: "utf8" });
+    assert.equal(r.status, 1, "normalized surface still counts its 2 hits");
+    assert.match(r.stderr, /apps\/factory@neo:color 2 > 1/);
+    // A surface that does not exist is loud, not forever-green.
+    write(
+      root,
+      "apps/factory/design/brands.json",
+      JSON.stringify({ neo: { surfaces: ["src/noe"], system: null } }),
+    );
+    r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/factory@neo:color=0"], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /does not exist under/);
+    // Absolute and ..-escaping surfaces are degenerate.
+    for (const bad of ["/etc", "../factory/src/neo"]) {
+      write(
+        root,
+        "apps/factory/design/brands.json",
+        JSON.stringify({ neo: { surfaces: [bad], system: null } }),
+      );
+      r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=apps/factory@neo:color=0"], { encoding: "utf8" });
+      assert.equal(r.status, 2, `'${bad}' must refuse`);
+      assert.match(r.stderr, /degenerate/);
+    }
+  });
+});
+
+test("a real directory named with '@' still budgets as a plain region (pnpm scopes)", () => {
+  withTempProject((root) => {
+    write(root, "packages/@acme/ui/a.tsx", `const a = "#111111"; const b = "#222222";`);
+    // No brands.json anywhere: pre-v0.4.0 behavior preserved.
+    let r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=packages/@acme/ui:color=2"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    r = spawnSync(process.execPath, [scriptPath, root, "--fail-on=packages/@acme/ui:color=1"], { encoding: "utf8" });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /packages\/@acme\/ui:color 2 > 1/);
+  });
+});
+
+test("a colour-dense file earns the palette/theme suggestion, not silence (#16)", () => {
+  withTempProject((root) => {
+    const many = Array.from({ length: 110 }, (_, i) => `"#${(0x100000 + i * 7).toString(16).padStart(6, "0")}"`);
+    write(root, "src/design-themes.config.ts", `export const T = [${many.join(",")}];`);
+    write(root, "src/app.tsx", `const a = "#ffffff"; const b = "#000000";`);
+    const r = scan(root);
+    assert.equal(r.findings.color.denseFiles.length, 1);
+    assert.equal(r.findings.color.denseFiles[0].file, "src/design-themes.config.ts");
+    const human = spawnSync(process.execPath, [scriptPath, root, "--no-color"], { encoding: "utf8" });
+    assert.match(human.stdout, /palette\/theme\/data file/);
+    assert.match(human.stdout, /design-drift-ignore-file/);
+  });
+});
+
 // The adversarial-review class: every vector below was found by a skeptic
 // pass over the v0.2.0 diff, reproduced, then fixed. Each test IS the repro.
 

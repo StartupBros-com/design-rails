@@ -141,3 +141,59 @@ test("wired requires BOTH the mention and a CLAUDE.md for Claude Code to load", 
     assert.match(wired.note, /no CLAUDE\.md/);
   });
 });
+
+test("multi-brand posture: blend-suspect fails, brand rows judge each system (#9)", () => {
+  const SHELL_DESIGN = `---\nname: "shell"\ncolors:\n  surface.canvas: "#0f0d15"\n---\n\n## Overview\nshell only\n`;
+  withRoot((root) => {
+    seedWorkspace(root);
+    write(root, "apps/healthy/design/brands.json", JSON.stringify({
+      neo: { surfaces: ["src/neo"], system: "design/neo/DESIGN.md" },
+      ttr: { surfaces: ["src/shared/TtrHero.tsx"], system: null },
+    }));
+    // App-level file still claims a primary -> the funnels blend, caught.
+    let d = JSON.parse(posture(root).stdout);
+    let healthy = d.results.find((x) => x.app === "apps/healthy");
+    const brandsRow = healthy.rows.find((r) => r.check === "brands");
+    assert.equal(brandsRow.pass, false);
+    assert.match(brandsRow.note, /one brand crowned over the others/);
+    // Shell-only app file + derived, referenced brand system -> all green.
+    write(root, "apps/healthy/design/DESIGN.md", SHELL_DESIGN);
+    write(root, "apps/healthy/design/neo/DESIGN.md", GOOD_DESIGN);
+    write(root, "apps/healthy/design/README.md", "registry: design/neo/DESIGN.md is neo's system\n");
+    d = JSON.parse(posture(root).stdout);
+    healthy = d.results.find((x) => x.app === "apps/healthy");
+    assert.equal(healthy.rows.find((r) => r.check === "brands").pass, true);
+    assert.equal(healthy.rows.find((r) => r.check === "brand:neo").pass, true);
+    const ttr = healthy.rows.find((r) => r.check === "brand:ttr");
+    assert.equal(ttr.pass, null, "registered-underived is INFO, not failure");
+    assert.match(ttr.note, /registered, underived/);
+    // An unreferenced brand system is unreachable -> that brand fails.
+    write(root, "apps/healthy/design/README.md", "registry mentions nothing\n");
+    d = JSON.parse(posture(root).stdout);
+    healthy = d.results.find((x) => x.app === "apps/healthy");
+    const neo = healthy.rows.find((r) => r.check === "brand:neo");
+    assert.equal(neo.pass, false);
+    assert.match(neo.note, /unreachable/);
+  });
+});
+
+test("@brand budget keys without a parent floor get flagged in enforced (adversarial)", () => {
+  withRoot((root) => {
+    seedWorkspace(root);
+    write(root, "apps/healthy/design/brands.json", JSON.stringify({
+      neo: { surfaces: ["styles"], system: null },
+    }));
+    write(root, ".github/workflows/design.yml",
+      "run: node scan.mjs . --fail-on=color=10,apps/healthy@neo:color=5\n");
+    let d = JSON.parse(posture(root).stdout);
+    let healthy = d.results.find((x) => x.app === "apps/healthy");
+    assert.match(healthy.rows.find((r) => r.check === "enforced").note, /no apps\/healthy:<detector> parent floor/);
+    // With the floor present, no flag.
+    write(root, ".github/workflows/design.yml",
+      "run: node scan.mjs . --fail-on=color=10,apps/healthy:color=8,apps/healthy@neo:color=5\n");
+    d = JSON.parse(posture(root).stdout);
+    healthy = d.results.find((x) => x.app === "apps/healthy");
+    const note = healthy.rows.find((r) => r.check === "enforced").note;
+    assert.doesNotMatch(note, /parent floor/);
+  });
+});

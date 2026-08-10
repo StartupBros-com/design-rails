@@ -88,6 +88,39 @@ design-rails tighten .github/workflows/design.yml
 design-rails bump color=2600 .github/workflows/design.yml --reason="vendored charting kit"
 ```
 
+## Multi-brand apps
+
+A landing-page factory can host several brands in one app — and a brand is
+rarely one directory (real case: a funnel whose surfaces were six files
+scattered across shared component dirs). Declare them once in
+`design/brands.json`:
+
+```json
+{
+  "house-of-vibe": { "surfaces": ["src/pages/house-of-vibe", "src/components/house-of-vibe"], "system": "design/house-of-vibe/DESIGN.md" },
+  "time-to-rise":  { "surfaces": ["src/components/heroes/TimeToRiseHero.astro"], "system": null }
+}
+```
+
+`system: null` registers a brand before its page ships, so its colours are
+ATTRIBUTED rather than counted as another brand's drift. Then:
+
+- `posture` judges each brand (and fails the app if its top-level DESIGN.md
+  still crowns one brand's `primary` over the others — keep it shared-shell)
+- `scan` tallies per brand (`workspace.regions` gets `unit@brand` rows) and
+  budgets fence them: `--fail-on=apps/x@time-to-rise:color=49` — file-shaped
+  surfaces included, which no directory prefix could do
+- `tighten` and `bump` maintain `@brand` keys like any other
+
+Two rules keep the registry honest: surfaces must EXIST (a typo'd path
+hard-errors instead of tallying zero forever), and `@brand` keys belong
+INSIDE a plain parent floor (`apps/x:color=N` — its scope is a literal
+string in the reviewed CI file), because a brand key's scope resolves
+through `brands.json`, which a later PR could quietly narrow. `posture`
+flags brand keys that lack the floor. A directory whose name contains `@`
+(pnpm's `packages/@acme/ui`) still budgets as a plain region — a real
+directory always wins over brand parsing.
+
 ## Principles
 
 - **Never edits your source.** Reports, authors under `design/`, and gates CI.
