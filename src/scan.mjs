@@ -411,6 +411,12 @@ const TW_HUE =
 const TW_TEXT_PX = { xs: 12, sm: 14, base: 16, lg: 18, xl: 20, "2xl": 24, "3xl": 30, "4xl": 36, "5xl": 48, "6xl": 60, "7xl": 72, "8xl": 96, "9xl": 128 };
 const TW_TEXT_SIZE = /\btext-(xs|sm|base|lg|xl|[2-9]xl)\b/g;
 
+// CSS <time> literals for the motion census (#24). The lookbehind keeps the
+// tail of an identifier ("v2s") and a decimal's own tail out; \b after the
+// unit keeps "2spin" out.
+const TIME_ALL = /(?<![\w.-])([\d.]+)(ms|s)\b/g;
+const TIME_ONE = /(?<![\w.-])([\d.]+)(ms|s)\b/;
+
 const PALETTE = new RegExp(`(?<![\\w-])(${TW_PREFIX})-(${TW_HUE})-(50|[1-9]00|950)\\b`, "g");
 
 // A value reached THROUGH a token is not a hardcode. `var(--x, #fff)` is a
@@ -615,7 +621,7 @@ function scanFile(abs) {
     return m ? parseIds(m[1]) : undefined;
   })();
 
-  const hits = { color: [], arbitrary: [], palette: [], varRefs: [], varDefs: [], declared: [], fontSizes: [] };
+  const hits = { color: [], arbitrary: [], palette: [], varRefs: [], varDefs: [], declared: [], fontSizes: [], motion: [], touch: [] };
   const isTokenFile = TOKEN_FILE.test(rel) || isTokenContent(text, rel);
   const isTestFile = TEST_FILE.test(rel);
   // Dark-block context for declared tokens: track brace depth; a dark opener
@@ -623,6 +629,12 @@ function scanFile(abs) {
   // mode:"dark". Theme files are structurally simple CSS, which is what makes
   // line-based brace counting sufficient here.
   let braceDepth = 0, darkAt = -1;
+  // Carry-over buffers for value lists and JSX tags that wrap onto following
+  // lines — line-at-a-time scanning otherwise reads prettier's default
+  // formatting as "no motion, no buttons". Both are hard-capped at 8 lines:
+  // an unterminated carry is dropped without a claim, never guessed at.
+  let motionCarry = null;
+  let touchCarry = null;
 
   let nextIgnore;
   for (let i = 0; i < lines.length; i++) {
@@ -667,8 +679,10 @@ function scanFile(abs) {
     // Type-scale samples (#24): Tailwind size classes, arbitrary text-[N],
     // and plain font-size declarations, all normalized to px. clamp()/var()
     // never match (the number must follow immediately), so fluid scales are
-    // simply not sampled rather than mis-read.
-    if (!isTokenFile) {
+    // simply not sampled rather than mis-read. off() so a bench file marked
+    // design-drift-ignore-file stops feeding the census — its sizes are
+    // exploration, not shipped hierarchy.
+    if (!isTokenFile && !off("typescale")) {
       for (const m of code.matchAll(TW_TEXT_SIZE)) hits.fontSizes.push(TW_TEXT_PX[m[1]]);
       for (const m of code.matchAll(/\btext-\[([\d.]+)(px|rem)\]/g)) {
         hits.fontSizes.push(m[2] === "rem" ? parseFloat(m[1]) * 16 : parseFloat(m[1]));
@@ -677,7 +691,151 @@ function scanFile(abs) {
         hits.fontSizes.push(m[2] === "rem" ? parseFloat(m[1]) * 16 : parseFloat(m[1]));
       }
     }
-    if (!isTokenFile && !off("color") && !TOKEN_CTX.test(code)) {
+
+    // Motion durations (#24): the census of every duration that ships.
+    // Sources, in order, each blanking what it consumed so nothing counts
+    // twice: longhand *-duration props (every <time> is a duration), React
+    // inline-style camelCase longhand with real units in a quoted string,
+    // shorthand transition:/animation: (first <time> per comma segment — the
+    // CSS grammar makes the second one a delay), duration-ish custom-property
+    // definitions, then Tailwind duration utilities on whatever text remains.
+    // Token files are IN scope (the issue names declared --transition tokens
+    // as a source). A shorthand whose value list wraps onto following lines
+    // (transition:\n  color .2s,\n  ...) is carried to its ;/} terminator and
+    // parsed once, attributed to the opener line — the fleet reproduced
+    // wrapped multi-property transitions reading as zero motion. Framer-
+    // motion's unitless `duration: 0.3` stays deliberately unsampled — JS
+    // animation config, not CSS — rather than guessed at.
+    if (!off("motion")) {
+      const extractMotion = (text, lineNo, srcLine) => {
+        let rest = text;
+        const pushMs = (num, unit) =>
+          hits.motion.push({
+            line: lineNo,
+            ms: Math.round(parseFloat(num) * (unit === "s" ? 1000 : 1)),
+            text: srcLine.trim().slice(0, 120),
+          });
+        const eat = (re, take) => {
+          rest = rest.replace(re, (...m) => {
+            take(m);
+            return " ".repeat(m[0].length);
+          });
+        };
+        eat(/\b(?:transition|animation)-duration\s*:\s*([^;{}"'\n]*)/gi, (m) => {
+          for (const t of m[1].matchAll(TIME_ALL) || []) pushMs(t[1], t[2]);
+        });
+        eat(/\b(?:transition|animation)Duration\s*:\s*["']([^"']*)["']/g, (m) => {
+          for (const t of m[1].matchAll(TIME_ALL) || []) pushMs(t[1], t[2]);
+        });
+        eat(/\b(?:transition|animation)\s*:\s*([^;{}"'\n]*)/gi, (m) => {
+          for (const seg of m[1].split(",")) {
+            const t = seg.match(TIME_ONE);
+            if (t) pushMs(t[1], t[2]);
+          }
+        });
+        eat(/--[\w-]*(?:duration|transition|motion)[\w-]*\s*:\s*([\d.]+)(ms|s)\b/gi, (m) => pushMs(m[1], m[2]));
+        for (const t of rest.matchAll(/(?<!-)\bduration-(\d+)\b/g)) {
+          hits.motion.push({ line: lineNo, ms: +t[1], text: srcLine.trim().slice(0, 120) });
+        }
+        for (const t of rest.matchAll(/(?<!-)\bduration-\[([\d.]+)(ms|s)\]/g)) pushMs(t[1], t[2]);
+      };
+      if (motionCarry) {
+        motionCarry.text += " " + code;
+        motionCarry.budget -= 1;
+        if (/[;}]/.test(code)) {
+          extractMotion(motionCarry.text, motionCarry.line, motionCarry.src);
+          motionCarry = null;
+        } else if (motionCarry.budget <= 0) motionCarry = null;
+      } else if (/\b(?:transition|animation)(?:-duration)?\s*:[^;{}]*$/i.test(code)) {
+        motionCarry = { text: code, line: i + 1, src: line, budget: 8 };
+      } else {
+        extractMotion(code, i + 1, line);
+      }
+    }
+
+
+    // Touch targets (#24): explicit heights on interactive elements, same-tag
+    // window. The window runs from the opener to its real `>` — an arrow
+    // function's `=>` never terminates it — so an icon's h-4 inside a button
+    // can never masquerade as the button's height. A tag whose attributes
+    // wrap onto following lines (prettier's default past a couple of props)
+    // is carried to its `>` and measured once, attributed to the opener line.
+    // Test files excluded: a fixture button is not a shipped target.
+    //
+    // Effective height follows CSS resolution: min-height beats max-height
+    // beats height. A max-h cap SMALLER than the declared height binds the
+    // box, so it must WIN the arithmetic, not lose it (the fleet reproduced
+    // h-20 max-h-6 reading as 80px "safe"; the real box is 24px). When only
+    // an unbounded side is visible — a floor under 44, a cap at or over 44 —
+    // the real height is unknowable and NO claim is recorded. A bare
+    // comparison `>` inside a prop expression still truncates the window;
+    // that residual only drops sources and is accepted as rare. Inline <a>
+    // stays out of scope: WCAG 2.5.8 exempts targets in text flow.
+    if (!isTestFile && !off("touch")) {
+      const tagEnd = (str, from) => {
+        let gt = str.indexOf(">", from);
+        while (gt > 0 && str[gt - 1] === "=") gt = str.indexOf(">", gt + 1);
+        return gt;
+      };
+      const measureTag = (win, lineNo, srcLine) => {
+        const hard = [], floors = [], caps = [];
+        const put = (kind, v) => (kind === "min" ? floors : kind === "max" ? caps : hard).push(v);
+        for (const m of win.matchAll(/\b(min-h|max-h|h|size)-(\d+(?:\.5)?)\b/g)) {
+          put(m[1] === "min-h" ? "min" : m[1] === "max-h" ? "max" : "h", parseFloat(m[2]) * 4);
+        }
+        for (const m of win.matchAll(/\b(min-h|max-h|h|size)-\[([\d.]+)(px|rem)\]/g)) {
+          put(m[1] === "min-h" ? "min" : m[1] === "max-h" ? "max" : "h", m[3] === "rem" ? parseFloat(m[2]) * 16 : parseFloat(m[2]));
+        }
+        for (const m of win.matchAll(/(?<![\w-])(min-|max-)?height:\s*["']?([\d.]+)(?:px)?["']?(?![\w.])/g)) {
+          put(m[1] === "min-" ? "min" : m[1] === "max-" ? "max" : "h", parseFloat(m[2]));
+        }
+        for (const m of win.matchAll(/\b(min|max)Height:\s*["']?([\d.]+)(?:px)?["']?(?![\w.])/g)) {
+          put(m[1], parseFloat(m[2]));
+        }
+        let eff;
+        if (hard.length) {
+          eff = Math.max(...hard);
+          if (caps.length) eff = Math.min(eff, Math.min(...caps));
+          if (floors.length) eff = Math.max(eff, Math.max(...floors));
+        } else if (floors.length) {
+          const fl = Math.max(...floors);
+          if (fl < 44) return; // floor only bounds from below: height unknown
+          eff = fl;
+        } else if (caps.length) {
+          const cap = Math.min(...caps);
+          if (cap >= 44) return; // cap only bounds from above: height unknown
+          eff = cap;
+        } else return;
+        hits.touch.push({ line: lineNo, px: eff, text: srcLine.trim().slice(0, 120) });
+      };
+      if (touchCarry) {
+        touchCarry.text += " " + code;
+        touchCarry.budget -= 1;
+        const gt = tagEnd(touchCarry.text, touchCarry.at);
+        if (gt !== -1) {
+          measureTag(touchCarry.text.slice(touchCarry.at, gt), touchCarry.line, touchCarry.src);
+          touchCarry = null;
+        } else if (touchCarry.budget <= 0) touchCarry = null;
+      }
+      if (!touchCarry) {
+        const starts = new Set();
+        for (const m of code.matchAll(/<button\b/gi)) starts.add(m.index);
+        for (const m of code.matchAll(/role=["']button["']/g)) {
+          // backtrack to the nearest OPENING tag — `</div` must never anchor
+          // a window (the fleet's hijack repro)
+          let lt = code.lastIndexOf("<", m.index);
+          while (lt !== -1 && !/[A-Za-z]/.test(code[lt + 1] || "")) {
+            lt = lt > 0 ? code.lastIndexOf("<", lt - 1) : -1;
+          }
+          if (lt !== -1) starts.add(lt);
+        }
+        for (const at of [...starts].sort((a, b) => a - b)) {
+          const gt = tagEnd(code, at);
+          if (gt !== -1) measureTag(code.slice(at, gt), i + 1, line);
+          else touchCarry = { text: code, at, line: i + 1, src: line, budget: 8 };
+        }
+      }
+    }    if (!isTokenFile && !off("color") && !TOKEN_CTX.test(code)) {
       for (const m of code.matchAll(HEX)) {
         if (isNumericReference(m[1])) continue;
         hits.color.push({
@@ -873,8 +1031,57 @@ function analyse(files) {
     }
   }
 
+  // Motion durations (#24): the shipped census against the 150-400ms
+  // interaction band the issue names. INFO only, floor of 5 samples — below
+  // that a band claim is noise. Vendor files excluded: their motion is not
+  // yours to retime.
+  const motionHits = [];
+  for (const f of files) {
+    if (!f || f.vendor) continue;
+    for (const h of f.hits.motion || []) motionHits.push({ ...h, file: f.rel });
+  }
+  let motion = null;
+  if (motionHits.length >= 5) {
+    const counts = new Map();
+    for (const h of motionHits) counts.set(h.ms, (counts.get(h.ms) || 0) + 1);
+    motion = {
+      samples: motionHits.length,
+      distinct: counts.size,
+      inBand: motionHits.filter((h) => h.ms >= 150 && h.ms <= 400).length,
+      under: motionHits.filter((h) => h.ms > 0 && h.ms < 150).length,
+      over: motionHits.filter((h) => h.ms > 400).length,
+      disabled: motionHits.filter((h) => h.ms === 0).length,
+      top: [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([ms, n]) => ({ ms, count: n })),
+      overExamples: motionHits.filter((h) => h.ms > 400).slice(0, 5).map((h) => ({ ms: h.ms, at: `${h.file}:${h.line}` })),
+    };
+  }
+
+  // Touch targets (#24): 44px Apple HIG, 24px the WCAG 2.5.8 hard floor.
+  // Renders when there is something to point at, or enough clean samples to
+  // say so; one or two all-fine samples say nothing. Vendor excluded.
+  const touchHits = [];
+  for (const f of files) {
+    if (!f || f.vendor) continue;
+    for (const h of f.hits.touch || []) touchHits.push({ ...h, file: f.rel });
+  }
+  let touch = null;
+  {
+    const under44 = touchHits.filter((h) => h.px < 44);
+    if (under44.length || touchHits.length >= 3) {
+      touch = {
+        samples: touchHits.length,
+        under44: under44.length,
+        under24: touchHits.filter((h) => h.px < 24).length,
+        min: Math.min(...touchHits.map((h) => h.px)),
+        examples: under44.slice(0, 5).map((h) => ({ px: h.px, at: `${h.file}:${h.line}`, text: h.text })),
+      };
+    }
+  }
+
   const report = { root, scanned: files.filter(Boolean).length, findings: {} };
   if (typescale) report.findings.typescale = typescale;
+  if (motion) report.findings.motion = motion;
+  if (touch) report.findings.touch = touch;
 
   if (enabled("color")) {
     const hits = scope.first.color;
@@ -917,8 +1124,23 @@ function analyse(files) {
     }
     // distinct > 100 already implies the file has 100+ hits, so no separate
     // total-hits floor is needed (a floor here read as if it did work).
+    // Stylesheets are exempt from BOTH clauses: in a plain-CSS app the one
+    // stylesheet holds ~all colour BY CONSTRUCTION and its literals are real
+    // drift, not a palette (a real scan nearly mislabelled exactly that), and
+    // a genuinely token-declaring stylesheet is already caught upstream by
+    // token-file detection. The exemption covers stylesheet-as-code too:
+    // vanilla-extract .css.ts and styled-components *.styles.ts are styling
+    // surfaces, not data. What remains — a config module or JSON holding most
+    // of the colour — is the palette/bench signal, at >100 distinct on
+    // ordinary share or >=30 distinct when the file is share-dominant.
+    const STYLESHEET = /(\.(css|scss|sass|less|styl)(\.(ts|js))?|\.styles\.[jt]sx?)$/i;
     const denseFiles = [...perFile.entries()]
-      .filter(([, e]) => e.occurrences / hits.length > 0.5 && e.values.size > 100)
+      .filter(
+        ([file, e]) =>
+          !STYLESHEET.test(file) &&
+          ((e.occurrences / hits.length > 0.5 && e.values.size > 100) ||
+            (e.occurrences / hits.length >= 0.9 && e.values.size >= 30)),
+      )
       .map(([file, e]) => ({ file, occurrences: e.occurrences, distinct: e.values.size }));
     report.findings.color = {
       occurrences: hits.length,
@@ -1302,6 +1524,29 @@ function render(r) {
     out.push(bold("type-scale contrast") + dim("  (largest heading ÷ body — under 2.0 reads timid)"));
     out.push(`  body ${t.body}px · largest ${t.largest}px · ratio ${yellow(t.ratio)} — ${t.verdict}`);
     out.push(dim(`    sizes in use: ${t.top.map((e) => `${e.px}px(${e.count})`).join(" ")} · ${t.samples} samples`));
+    out.push("");
+  }
+
+  if (f.motion) {
+    const m = f.motion;
+    out.push(bold("motion durations") + dim("  (census vs the 150-400ms interaction band)"));
+    out.push(
+      `  ${m.samples} durations · ${m.distinct} distinct · ${m.inBand} in band · ${m.under} under 150ms · ${m.over ? yellow(m.over) : 0} over 400ms` +
+        (m.disabled ? dim(` · ${m.disabled} disabled (0)`) : ""),
+    );
+    out.push(dim(`    in use: ${m.top.map((e) => `${e.ms}ms(${e.count})`).join(" ")}`));
+    for (const e of m.overExamples) out.push(dim(`      ${e.ms}ms  ${e.at}`));
+    out.push("");
+  }
+
+  if (f.touch) {
+    const t = f.touch;
+    out.push(bold("touch targets") + dim("  (explicit heights on interactive elements — 44px Apple HIG, 24px WCAG 2.5.8)"));
+    if (!t.under44) out.push(dim(`  all ${t.samples} explicitly-sized interactive elements are 44px or taller`));
+    else {
+      out.push(`  ${t.samples} explicitly sized · ${yellow(t.under44)} under 44px · ${t.under24 ? red(t.under24) : 0} under 24px · smallest ${t.min}px`);
+      for (const e of t.examples) out.push(dim(`      ${String(e.px).padStart(3)}px  ${e.at}`));
+    }
     out.push("");
   }
 
