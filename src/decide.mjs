@@ -30,6 +30,7 @@
     node decide.mjs <app-dir> --record <slug>=<option> --rationale="…"
 */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -175,6 +176,58 @@ function renderPage(d, ctx, appName) {
 `;
 }
 
+// One UNIFIED page per operator moment (the compound-engineering convention:
+// a single reviewable artifact, not one tab per item). Per-decision pages
+// stay as the durable, slug-addressed, PR-diffable artifacts; the index is
+// what a human actually opens. Markup mirrors renderPage's body.
+function renderIndex(decisions, ctx, appName) {
+  const section = (d) => {
+    const opts = d.options
+      .map(
+        (o) => `
+    <section class="option">
+      <h2>Option <code>${esc(o.name)}</code></h2>
+      ${d.kind === "chart" ? sampleChart(o.colors, ctx.canvas) : ""}
+      ${sampleRole(o.colors, ctx)}
+      <p class="desc">${esc(o.desc)}</p>
+    </section>`,
+      )
+      .join("\n");
+    return `
+<section id="${esc(d.slug)}">
+<h2 class="dtitle">${esc(d.title)} <small>[open]</small></h2>
+<p>${esc(d.context)}</p>
+<div class="options">${opts}</div>
+<div class="evidence"><strong>Evidence</strong><ul>${d.evidence.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>
+<p>Record with: <code>node decide.mjs ${esc(appName)} --record ${esc(d.slug)}=&lt;option&gt; --rationale="…"</code></p>
+</section>`;
+  };
+  const n = decisions.length;
+  const nav =
+    n > 1
+      ? `<nav><ul>${decisions.map((d) => `<li><a href="#${esc(d.slug)}">${esc(d.title)}</a></li>`).join("")}</ul></nav>`
+      : "";
+  return `<!doctype html>
+<meta charset="utf-8">
+<title>${n} open design decision${n === 1 ? "" : "s"} — ${esc(appName)}</title>
+<style>
+  body{font:15px/1.5 system-ui;margin:2rem auto;max-width:920px;padding:0 1rem;color:#1a1a1a}
+  .options{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.2rem}
+  .option{border:1px solid #ddd;border-radius:10px;padding:1rem}
+  .ctx{border-radius:8px;padding:14px;margin:.6rem 0}
+  .sw{display:inline-block;width:22px;height:22px;border-radius:4px;vertical-align:middle;border:1px solid rgba(0,0,0,.15)}
+  .swatches{margin-top:10px}
+  .evidence{background:#f6f6f6;border-radius:8px;padding:.8rem 1rem;font-size:13.5px}
+  svg{width:100%;height:auto;margin-bottom:.4rem}
+  code{background:#f2f2f2;padding:1px 5px;border-radius:4px}
+  section[id]{border-top:2px solid #eee;margin-top:2rem;padding-top:.6rem}
+  .dtitle{font-size:1.35rem}
+</style>
+<h1>${n} open design decision${n === 1 ? "" : "s"} — ${esc(appName)}</h1>
+${nav}
+${decisions.map(section).join("\n")}`;
+}
+
 // ---------------------------------------------------------------- recording
 
 function record(md, slug, option, why) {
@@ -236,4 +289,28 @@ for (const d of decisions) {
   const p = join(outDir, `${d.slug}.html`);
   writeFileSync(p, renderPage(d, ctx, appName));
   console.log(`design-drift decide: wrote ${p} (${d.options.length} options, kind=${d.kind})`);
+}
+const indexPath = join(outDir, "index.html");
+writeFileSync(indexPath, renderIndex(decisions, ctx, appName));
+console.log(`design-drift decide: wrote ${indexPath} — the ONE page to open (${decisions.length} open decision${decisions.length === 1 ? "" : "s"})`);
+
+// --open (#20): best-effort launch of the unified page. Openers fail silently
+// on some hosts (WSL interop wedges), so the path above ALWAYS prints and an
+// opener failure is never an error.
+if (args.includes("--open")) {
+  const candidates =
+    process.platform === "darwin"
+      ? [["open", [indexPath]]]
+      : process.platform === "win32"
+        ? [["cmd", ["/c", "start", "", indexPath]]]
+        : [["xdg-open", [indexPath]], ["wslview", [indexPath]]];
+  let opened = false;
+  for (const [cmd, argv] of candidates) {
+    const r = spawnSync(cmd, argv, { stdio: "ignore", timeout: 5000 });
+    if (r.status === 0) {
+      opened = true;
+      break;
+    }
+  }
+  if (!opened) console.log("design-drift decide: no opener worked here — open the index path above by hand");
 }

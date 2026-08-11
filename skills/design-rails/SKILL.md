@@ -44,9 +44,11 @@ a release — the bare npm name is unclaimed, so never `npx design-rails`).
    per brand with `--brand=<name>` (output defaults to the brand's system
    dir; a brand-named token like `--color-hov` claims primary via the
    registry's `"primary"` field).
-3. **Settle what it flags.** `node src/decide.mjs <app>` renders each open
-   decision in `design/REVIEW.md` as a self-contained HTML page — options side
-   by side on the app's real canvas. Human picks; record with
+3. **Settle what it flags.** `node src/decide.mjs <app> --open` renders every
+   open decision in `design/REVIEW.md` and opens ONE unified page
+   (`design/decisions/index.html` — options side by side on the app's real
+   canvas, one document per operator moment; per-decision pages stay as the
+   durable, slug-addressed artifacts). Human picks; record with
    `--record <slug>=<option> --rationale="…"`.
 4. **Wire where `wired` fails.** The app's agent instructions (AGENTS.md /
    CLAUDE.md) must name `design/DESIGN.md` as the styling source of truth — an

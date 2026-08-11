@@ -1,6 +1,6 @@
 {
   "name": "design-rails",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Guardrails that keep AI agents on YOUR design — posture-check, derive, decide, wire, and enforce your design system from the code you already ship.",
   "author": {
     "name": "StartupBros",
