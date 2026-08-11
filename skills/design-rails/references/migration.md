@@ -47,3 +47,31 @@ Commit the migration BEFORE any rebase — a rebase over a squash-merged base
 conflicts, autostashes uncommitted work, and a tighten run in that limbo
 measures the pre-migration tree with total confidence (this happened; the
 provenance line in scan output exists because of it).
+
+## Plain-CSS apps (no Tailwind, no build step)
+
+Same pipeline, simpler mechanics, two different traps. Exercised end-to-end
+on a real plain-CSS React app (single stylesheet, 84 literals, 29 migrated).
+
+1. **Tokens land in a `:root` block** at the top of the main stylesheet (or
+   a new `styles/tokens.css` imported first). Name them `--color-<primitive>`
+   straight from design/tokens/color.json.
+2. **Exact-value substitution only, with a hex boundary guard.** Replace a
+   literal with `var(--color-x)` ONLY where the value is byte-equal to the
+   token's, case-insensitively, and terminate the match at a non-hex
+   character: `#fff` must never eat `#fffefa`.
+3. **Near-identical variants stay put.** Folding a #fbf9f1 into a #f3ede2
+   canvas CHANGES shipped colour — that is a decide record, not a migration.
+   Migrate the exact matches; the collapse pass belongs to the human.
+4. **Verification without a build.** Exact-value substitution is
+   value-identical by construction, so prove hygiene instead: re-scan and
+   require zero unresolved tokens (every `var()` must resolve) plus the
+   count arithmetic (before − migrated = after, allowing for literals that
+   moved onto token-definition lines, which stop counting).
+5. **Trap: tokens declared in the app's main stylesheet** (`styles.css`
+   opening with `--bg: …`) are NOT recognized as declared tokens —
+   token-file detection keys on file naming and declaration density, and an
+   app's whole stylesheet qualifies as neither. propose will derive fresh
+   names alongside the existing ones. Either move existing tokens into a
+   file named `tokens.css`/`globals.css` first, or expect renames and
+   migrate the old names too.

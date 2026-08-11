@@ -2,8 +2,9 @@
 name: design-rails
 description: >-
   Guardrails that keep AI agents on the project's design system. Use when asked
-  to check design-system posture, author a DESIGN.md from an existing codebase,
-  settle open design decisions from rendered option pages, wire an app's agent
+  to check design-system posture, measure touch-target sizes, animation timing,
+  or type-scale hierarchy, author a DESIGN.md from an existing codebase, settle
+  open design decisions from rendered option pages, wire an app's agent
   instructions to its DESIGN.md, migrate colour literals onto tokens, or
   tighten drift budgets in CI.
 allowed-tools: Bash, Read, Grep, Glob
