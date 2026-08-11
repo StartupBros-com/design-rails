@@ -628,7 +628,7 @@ function scanFile(abs) {
   // marks the depth it opened at, and everything until that depth closes is
   // mode:"dark". Theme files are structurally simple CSS, which is what makes
   // line-based brace counting sufficient here.
-  let braceDepth = 0, darkAt = -1;
+  let braceDepth = 0, darkAt = -1, rootAt = -1;
   // Carry-over buffers for value lists and JSX tags that wrap onto following
   // lines — line-at-a-time scanning otherwise reads prettier's default
   // formatting as "no motion, no buttons". Both are hard-capped at 8 lines:
@@ -912,6 +912,62 @@ function scanFile(abs) {
         hits.declared.push({ line: i + 1, name: m[1], raw: m[2], ref: m[2], hex: null, mode });
       }
       braceDepth += (code.match(/\{/g) || []).length - (code.match(/\}/g) || []).length;
+      if (darkAt !== -1 && braceDepth <= darkAt) darkAt = -1;
+    } else if (/\.(css|scss)$/i.test(rel)) {
+      // Declared tokens in an ORDINARY stylesheet (#34): an app whose main
+      // stylesheet opens with `:root { --bg: ...; }` has declared its intent
+      // just as loudly as a tokens.css would — but token-file detection keys
+      // on naming and declaration density, so propose used to invent parallel
+      // names alongside the app's own (found deriving a real plain-CSS app).
+      // Collection is scoped to :root/html blocks PER CHARACTER, not per
+      // line: in minified CSS a component rule shares the physical line with
+      // :root, and line-level scoping blessed `.badge{--danger:...}` as a
+      // design token (fleet repro). A component-scoped custom property is a
+      // local variable, not a token. Dark contexts honored like token files.
+      // Drift counts cannot move here — TOKEN_CTX already excludes `--x:`
+      // lines from the colour detector — so this feeds the proposer only.
+      if (darkAt === -1 && DARK_OPENER.test(code)) darkAt = braceDepth;
+      const mode = darkAt === -1 ? "light" : "dark";
+      const openerBraces = new Set();
+      for (const om of code.matchAll(/(^|[\s,{;}])(:root|html)\b[^{}]*\{/g)) {
+        openerBraces.add(om.index + om[0].length - 1);
+      }
+      let depth = braceDepth;
+      let rootActive = rootAt !== -1;
+      let rootDepth = rootAt;
+      let segStart = rootActive ? 0 : -1;
+      const segments = [];
+      for (let ci = 0; ci < code.length; ci++) {
+        const ch = code[ci];
+        if (ch === "{") {
+          if (!rootActive && openerBraces.has(ci)) {
+            rootActive = true;
+            rootDepth = depth;
+            segStart = ci + 1;
+          }
+          depth += 1;
+        } else if (ch === "}") {
+          depth -= 1;
+          if (rootActive && depth <= rootDepth) {
+            segments.push(code.slice(segStart, ci));
+            rootActive = false;
+            segStart = -1;
+          }
+        }
+      }
+      if (rootActive) segments.push(code.slice(segStart));
+      for (const seg of segments) {
+        for (const m of seg.matchAll(DECL_CSS_VAR)) {
+          const aliasM = m[2].trim().match(/^var\(\s*(--[A-Za-z0-9_-]+)\s*\)$/);
+          if (aliasM) {
+            hits.declared.push({ line: i + 1, name: m[1], raw: m[2].trim(), cssRef: aliasM[1], hex: null, mode, sheet: true });
+          } else {
+            hits.declared.push({ line: i + 1, name: m[1], raw: m[2].trim(), hex: resolveDeclaredColor(m[2]), mode, sheet: true });
+          }
+        }
+      }
+      braceDepth = depth;
+      rootAt = rootActive ? rootDepth : -1;
       if (darkAt !== -1 && braceDepth <= darkAt) darkAt = -1;
     }
     if (!off("arbitrary")) {
@@ -1222,9 +1278,21 @@ function analyse(files) {
         line: d.line,
         refs: refCounts.get(d.name) || 0,
         overrides: 0,
+        ...(d.sheet ? { sheet: true } : {}),
       });
     }
-    report.findings.declaredTokens = [...byName.values()].sort((a, b) => b.refs - a.refs || a.name.localeCompare(b.name));
+    // A name declared BOTH in a genuine token file and in an ordinary
+    // stylesheet's :root (#34): the token file is the deliberate declaration,
+    // the stylesheet's is incidental — an app's ad-hoc `--primary` in
+    // index.css must never shadow tokens.css by scan order (fleet repro:
+    // the winner flipped when a file was renamed). Same rule when values
+    // agree: the token-file citation is the better provenance.
+    const tokenFileNames = new Set();
+    for (const v of byName.values()) if (!v.sheet) tokenFileNames.add(`${v.mode} ${v.name}`);
+    report.findings.declaredTokens = [...byName.values()]
+      .filter((v) => !v.sheet || !tokenFileNames.has(`${v.mode} ${v.name}`))
+      .map(({ sheet, ...v }) => v)
+      .sort((a, b) => b.refs - a.refs || a.name.localeCompare(b.name));
   }
 
   {

@@ -1659,3 +1659,74 @@ test("dense files: stylesheets are exempt from BOTH clauses, styles-as-code too 
     assert.equal(scan(root).findings.color.denseFiles, undefined);
   });
 });
+
+test(":root tokens in an ordinary stylesheet feed the declared inventory (#34)", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/styles.css",
+      [
+        ":root {",
+        "  --bg: #f4f3ef;",
+        "  --ink: #1d1d1a;",
+        "  --radius: 8px;", // non-colour: recorded hex-null, skipped downstream
+        "}",
+        ".card { --pad: 4px }", // component-scoped prop: NOT a token
+        ".other { color: #123456; }",
+        "@media (prefers-color-scheme: dark) { :root { --bg: #101010; } }",
+      ].join("\n"),
+    );
+    const r = scan(root, "--full");
+    const decl = r.findings.declaredTokens;
+    const bg = decl.filter((t) => t.name === "--bg");
+    assert.equal(bg.length, 2);
+    assert.deepEqual(bg.map((t) => t.mode).sort(), ["dark", "light"]);
+    assert.equal(bg.find((t) => t.mode === "light").hex, "#f4f3ef");
+    assert.equal(decl.some((t) => t.name === "--pad"), false);
+    // gate neutrality: the :root lines never were drift, and still aren't
+    assert.equal(r.findings.color.occurrences, 1); // only .card's #123456
+  });
+});
+
+test("a stylesheet's :root tokens win role assignment over residual clustering (#34)", () => {
+  withTempProject((root) => {
+    // the tend shape: app declares its canvas, drift uses a NEAR-identical value
+    const noise = Array.from({ length: 6 }, (_, i) => `.n${i} { color: #f3ede${i % 3}; }`).join("\n");
+    write(root, "src/styles.css", ":root { --bg: #f4f3ef; --ink: #1d1d1a; }\n" + noise);
+    const propose = spawnSync(
+      process.execPath,
+      [join(dirname(fileURLToPath(import.meta.url)), "..", "src", "propose.mjs"), root],
+      { encoding: "utf8" },
+    );
+    assert.equal(propose.status, 0, propose.stderr);
+    assert.match(propose.stdout, /declared as `--bg`/);
+    assert.match(propose.stdout, /#f4f3ef/);
+  });
+});
+
+test("minified CSS: a component rule sharing :root's line never leaks a token (#34, fleet)", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/min.css",
+      ":root{--surface:#f5f5f5;--ink:#1a1a1a;}.badge-danger{--danger:#e5153a;}.btn{color:red;}",
+    );
+    const names = scan(root, "--full").findings.declaredTokens.map((t) => t.name).sort();
+    assert.deepEqual(names, ["--ink", "--surface"]);
+  });
+});
+
+test("a token FILE's declaration beats an ordinary stylesheet's, whatever the scan order (#34, fleet)", () => {
+  const check = (secondName) =>
+    withTempProject((root) => {
+      write(root, "src/tokens.css", ":root { --primary: #ff00aa; }");
+      write(root, `src/${secondName}`, ":root { --primary: #112233; }");
+      write(root, "src/uses.css", ".btn { color: var(--primary); }");
+      const decl = scan(root, "--full").findings.declaredTokens.filter((t) => t.name === "--primary");
+      assert.equal(decl.length, 1);
+      assert.equal(decl[0].hex, "#ff00aa");
+      assert.match(decl[0].file, /tokens\.css/);
+    });
+  check("app.css"); // sorts BEFORE tokens.css
+  check("zzz-legacy.css"); // sorts AFTER tokens.css
+});
