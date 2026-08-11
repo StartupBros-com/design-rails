@@ -1730,3 +1730,7 @@ test("a token FILE's declaration beats an ordinary stylesheet's, whatever the sc
   check("app.css"); // sorts BEFORE tokens.css
   check("zzz-legacy.css"); // sorts AFTER tokens.css
 });
+
+test("PROBE: deliberate failure to prove the gate blocks a red merge", () => {
+  assert.equal(1, 2);
+});
