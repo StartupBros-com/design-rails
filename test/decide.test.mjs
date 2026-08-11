@@ -257,3 +257,38 @@ test("without a token palette the thin sample still renders (fallback intact)", 
     assert.match(page, /candidate colour/, "pre-scene sample still works");
   });
 });
+
+test("a Recommend line renders as a banner, badges its option, and shows measured evidence (operator finding)", () => {
+  withApp((root) => {
+    write(root, "design/tokens/color.json", JSON.stringify({
+      primitive: {
+        canvas: { $value: "#ffffff" },
+        ink: { $value: "#182c56" },
+        "ink-mute": { $value: "#65758b" },
+        brand: { $value: "#f73e49" },
+      },
+    }));
+    write(root, "design/REVIEW.md", [
+      "### Decision: muted text [open]",
+      "Role: ink-mute",
+      "Recommend: keep-token — both pass AA but the original scrapes by with 0.03 headroom; functional roles optimize function over provenance",
+      "Which gray carries body copy.",
+      "- **Option go-original:** body copy moves to #6f7592",
+      "- **Option keep-token:** pages migrate onto #65758b",
+      "Evidence: 85 uses",
+    ].join("\n"));
+    const r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    const page = readFileSync(join(root, "design", "decisions", "muted-text.html"), "utf8");
+    assert.match(page, /Recommendation: <code>keep-token<\/code>/, "banner names the recommended option");
+    assert.match(page, /functional roles optimize function/, "reasoning rides the banner");
+    assert.match(page, /class="option recommended"/, "recommended card highlighted");
+    assert.match(page, /recbadge/, "badge on the recommended option");
+    // Computed metrics, not vibes: AA verdicts with headroom, both options.
+    assert.match(page, /contrast on canvas 4\.53:1 — AA body PASS \(headroom 0\.03\)/);
+    assert.match(page, /contrast on canvas 4\.70:1 — AA body PASS \(headroom 0\.20\)/);
+    assert.match(page, /vs current #65758b: 1\.0\d:1 \(imperceptible\)/, "perceptibility vs the sitting value");
+    // The Recommend line never leaks into the context prose.
+    assert.doesNotMatch(page, /<p>Recommend:/);
+  });
+});
