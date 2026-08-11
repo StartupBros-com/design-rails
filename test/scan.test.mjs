@@ -1340,3 +1340,30 @@ test("--bump persists its reason as a dated comment above the budget's command",
     assert.match(lines[cmd + 1], /--fail-on=color=9/, "continuation chain intact");
   });
 });
+
+test("notation identity: rgb()/hsl() drift resolves to hex identity (#12)", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/a.tsx",
+      [
+        `const glow = "rgba(57,255,20,0.15)";`,
+        `const red = "rgb(255 0 0)";`,
+        `const navy = "hsl(220 45% 22%)";`,
+        `const same1 = "rgb(23,44,86)";`,
+        `const same2 = "#172c56";`,
+        `const nested = "rgba(23, 44, 86, calc(1 - 0.5))";`,
+      ].join("\n"),
+    );
+    const r = scan(root);
+    const values = Object.fromEntries(r.findings.color.top.map((t) => [t.value, t.count]));
+    assert.equal(values["#39ff14@0.15"], 1, "alpha variants keep their alpha in the identity");
+    assert.equal(values["#ff0000"], 1, "space-syntax rgb resolves");
+    assert.equal(values["#1f3051"], 1, "hsl resolves through the same math as declared tokens");
+    assert.equal(values["#172c56"], 2, "rgb(23,44,86) and #172c56 are ONE identity");
+    // A call with nested parens cannot be settled by the flat-args parser:
+    // it keeps the legacy bucket, and the occurrence still counts.
+    assert.equal(values["rgba()"], 1, "unresolvable stays in the legacy bucket");
+    assert.equal(r.findings.color.occurrences, 6);
+  });
+});

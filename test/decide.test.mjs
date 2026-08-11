@@ -292,3 +292,75 @@ test("a Recommend line renders as a banner, badges its option, and shows measure
     assert.doesNotMatch(page, /<p>Recommend:/);
   });
 });
+
+test("--record prunes the decided page and refreshes the index; zero-open cleans up (#26)", () => {
+  withApp((root) => {
+    seedReview(root);
+    let r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(existsSync(join(root, "design", "decisions", "charts-palette.html")));
+    // Record one: its page goes, the index stays truthful.
+    r = decide(root, "--record", "charts-palette=violet-ramp", "--rationale=x");
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!existsSync(join(root, "design", "decisions", "charts-palette.html")), "decided page pruned");
+    assert.match(r.stdout, /index refreshed \(1 still open\)/);
+    const idx = readFileSync(join(root, "design", "decisions", "index.html"), "utf8");
+    assert.doesNotMatch(idx, /charts-palette/, "index no longer lists the decided slug");
+    // Record the last one: index says zero, page pruned.
+    r = decide(root, "--record", "success-token=bare", "--rationale=y");
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!existsSync(join(root, "design", "decisions", "success-token.html")));
+    const idx2 = readFileSync(join(root, "design", "decisions", "index.html"), "utf8");
+    assert.match(idx2, /0 open design decisions/);
+    // A plain run with nothing open is cleanup, not inertia.
+    r = decide(root);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /no open decisions — artifacts pruned/);
+  });
+});
+
+test("colliding decision slugs refuse loudly — never a silent misrecord (adversarial)", () => {
+  withApp((root) => {
+    write(root, "design/REVIEW.md", [
+      "### Decision: Success Token [open]",
+      "- **Option a:** #111111",
+      "Evidence: e1",
+      "",
+      "### Decision: Success::Token [open]",
+      "- **Option b:** #222222",
+      "Evidence: e2",
+    ].join("\n"));
+    let r = decide(root);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /both slugify to 'success-token'/);
+    assert.match(r.stderr, /Retitle one/);
+    r = decide(root, "--record", "success-token=a", "--rationale=x");
+    assert.equal(r.status, 2, "record path refuses the ambiguity too");
+  });
+});
+
+test("a renamed-while-open decision's orphan page is reclaimed; human files never touched (adversarial)", () => {
+  withApp((root) => {
+    write(root, "design/REVIEW.md", [
+      "### Decision: old title [open]",
+      "- **Option a:** #111111",
+      "Evidence: e",
+    ].join("\n"));
+    let r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(existsSync(join(root, "design", "decisions", "old-title.html")));
+    // A human parks their own notes in the same dir.
+    writeFileSync(join(root, "design", "decisions", "notes.html"), "<p>mine</p>");
+    // The decision is retitled while still open.
+    write(root, "design/REVIEW.md", [
+      "### Decision: new title [open]",
+      "- **Option a:** #111111",
+      "Evidence: e",
+    ].join("\n"));
+    r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!existsSync(join(root, "design", "decisions", "old-title.html")), "orphan reclaimed by marker");
+    assert.ok(existsSync(join(root, "design", "decisions", "new-title.html")));
+    assert.ok(existsSync(join(root, "design", "decisions", "notes.html")), "unmarked human file untouched");
+  });
+});

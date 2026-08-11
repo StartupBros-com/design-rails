@@ -202,11 +202,18 @@ function clusterColors(inventory, k) {
   }
   if (points.length === 0) return [];
   if (points.length <= k) {
+    // Same enrichment as the full path below: the short-circuit used to skip
+    // chroma/hue, so every isNeutral/isChromatic predicate read undefined and
+    // a small-palette repo (≤k distinct colours) derived ZERO roles. Latent
+    // for the whole life of the engine — real repos always exceeded k — and
+    // exposed by the dark-polarity fixture (#27).
     return points.map((p) => ({
       hex: p.hex,
       count: p.count,
       members: [p],
       lab: p.lab,
+      chroma: Math.hypot(p.lab.a, p.lab.b),
+      hue: Math.atan2(p.lab.b, p.lab.a),
     }));
   }
 
@@ -343,7 +350,7 @@ function roleForTokenName(rawName) {
   // is that button's border, `noticeSuccessText` is that notice's text — both
   // real names from one measured theme.ts, both of which claimed global roles
   // until this guard existed.
-  const COMPONENT_WORDS = ["button", "input", "table", "notice", "toast", "badge", "tooltip", "modal", "menu", "chip", "tag", "avatar", "checkbox", "radio", "slider", "scrollbar"];
+  const COMPONENT_WORDS = ["button", "input", "table", "notice", "toast", "badge", "tooltip", "modal", "menu", "chip", "tag", "avatar", "checkbox", "radio", "slider", "scrollbar", "sidebar"];
   if (COMPONENT_WORDS.some(has)) return null;
   if (has("foreground") || has("fg") || has("ink") || has("on")) {
     if (has("muted")) return "inkMute";
@@ -448,6 +455,28 @@ function assignRoles(clusters, pre = {}) {
   // than it was, not wider.
   const isNeutral = (c) => c.chroma < 0.05;
   const isChromatic = (c) => c.chroma >= 0.06;
+  // Dark-canvas polarity (#27): the lightness heuristics below assumed light
+  // systems, so a dark-identity brand derived from residuals abstained on
+  // every structural role (the matrix-green lander's #0a0a0c ×15 was plainly
+  // the canvas and got nothing). Polarity comes from the declared canvas when
+  // one exists, else from where the usage-weighted neutral mass sits.
+  const darkPolarity = (() => {
+    // Signal 1: the app SAYS so (color-scheme in its stylesheets).
+    if (declaredScheme === "dark") return true;
+    if (declaredScheme === "light") return false;
+    // Signal 2: a declared canvas token.
+    if (pre.canvas) return pre.canvas.lab.L < 0.5;
+    // Signal 3: residual mass — but DOMINANT (2x), because a light app's
+    // dark TEXT literals routinely outnumber its light canvas literals
+    // (adversarial repro: 100x #111 text flipped a plainly light app).
+    let darkMass = 0, lightMass = 0;
+    for (const c of clusters) {
+      if (!isNeutral(c)) continue;
+      if (c.lab.L < 0.5) darkMass += c.count;
+      else lightMass += c.count;
+    }
+    return darkMass > 2 * lightMass;
+  })();
   // Hue windows in OKLab a/b angle. Approximate, good enough for role picking.
   const hueNear = (c, target, width = 0.6) => {
     let d = Math.abs(c.hue - target);
@@ -462,27 +491,83 @@ function assignRoles(clusters, pre = {}) {
   // Neutrals first — these are structural and must not be stolen by status/brand.
   //
   // 1. Canvas: very light neutral. L > 0.93 keeps mid-greys out of "elevated".
-  const canvas = pre.canvas || take((c) => (isNeutral(c) && c.lab.L > 0.93 ? c.count * c.lab.L : null));
+  const canvas =
+    pre.canvas ||
+    (darkPolarity
+      ? (() => {
+          const neutralMass = clusters.reduce((n, c) => n + (isNeutral(c) ? c.count : 0), 0);
+          const floor = Math.max(3, neutralMass * 0.05);
+          // Darkest substantial neutral: 1000*(1-L) dominates any count, so
+          // depth wins and count only breaks ties among equal depths.
+          return take((c) =>
+            isNeutral(c) && c.lab.L < 0.3 && c.count >= floor ? 1000 * (1 - c.lab.L) + Math.min(c.count, 999) / 1000 : null,
+          );
+        })()
+      : take((c) => (isNeutral(c) && c.lab.L > 0.93 ? c.count * c.lab.L : null)));
   // 2. Ink / text-primary: darkest neutral. Exclude pure black if a near-black
   //    with more character is available — pure #000 is rarely a brand ink.
-  const ink = pre.ink || take((c) => {
-    if (!isNeutral(c) || c.lab.L >= 0.35) return null;
-    // Prefer near-blacks that aren't pure #000/#fff endpoints when possible.
-    const endpoint = c.hex === "#000000" || c.hex === "#000" ? 0.5 : 1;
-    return c.count * (1 - c.lab.L) * endpoint;
-  });
-  // 3. Hairline BEFORE elevated: mid-light greys are borders, not surfaces.
-  //    Getting this order wrong is what made #cecece land as "elevated" on the
-  //    first live run.
-  const hairline = pre.hairline || take((c) =>
-    isNeutral(c) && c.lab.L > 0.72 && c.lab.L <= 0.93 ? c.count : null,
-  );
-  // 4. Elevated: remaining very-light neutral (card/panel fill).
-  const elevated = pre.elevated || take((c) => (isNeutral(c) && c.lab.L > 0.88 ? c.count * c.lab.L : null));
-  // 5. Ink-secondary / muted text.
-  const inkMute = pre.inkMute || take((c) =>
-    isNeutral(c) && c.lab.L > 0.35 && c.lab.L <= 0.72 ? c.count : null,
-  );
+  const ink =
+    pre.ink ||
+    (darkPolarity
+      ? take((c) => {
+          // Dark system: ink is the LIGHT neutral; pure #fff gets the same
+          // endpoint discount pure #000 gets on light systems.
+          if (!isNeutral(c) || c.lab.L <= 0.8) return null;
+          const endpoint = c.hex === "#ffffff" ? 0.5 : 1;
+          return c.count * c.lab.L * endpoint;
+        })
+      : take((c) => {
+          if (!isNeutral(c) || c.lab.L >= 0.35) return null;
+          // Prefer near-blacks that aren't pure #000/#fff endpoints when possible.
+          const endpoint = c.hex === "#000000" || c.hex === "#000" ? 0.5 : 1;
+          return c.count * (1 - c.lab.L) * endpoint;
+        }));
+  // 3+4. Hairline and elevated, polarity-ordered. Light: borders first —
+  // mid-light greys are borders, not surfaces (getting THAT order wrong made
+  // #cecece land as "elevated" on the first live run). Dark: the ELEVATED
+  // panel first — the tone nearer the canvas — else hairline's (0.25,0.55]
+  // window swallows the panel and elevated abstains (adversarial repro).
+  const takeHairline = () =>
+    take((c) =>
+      darkPolarity
+        ? isNeutral(c) && c.lab.L > 0.25 && c.lab.L <= 0.55
+          ? c.count * c.lab.L
+          : null
+        : isNeutral(c) && c.lab.L > 0.72 && c.lab.L <= 0.93
+          ? c.count
+          : null,
+    );
+  const takeElevated = () =>
+    take((c) =>
+      darkPolarity
+        ? // nearer the canvas wins: weight by darkness, not lightness
+          isNeutral(c) && c.lab.L > 0.05 && c.lab.L <= 0.4
+          ? c.count * (1 - c.lab.L)
+          : null
+        : isNeutral(c) && c.lab.L > 0.88
+          ? c.count * c.lab.L
+          : null,
+    );
+  let hairline = pre.hairline || null;
+  let elevated = pre.elevated || null;
+  if (darkPolarity) {
+    elevated = elevated || takeElevated();
+    hairline = hairline || takeHairline();
+  } else {
+    hairline = hairline || takeHairline();
+    elevated = elevated || takeElevated();
+  }
+  const inkMute =
+    pre.inkMute ||
+    take((c) =>
+      darkPolarity
+        ? isNeutral(c) && c.lab.L > 0.55 && c.lab.L <= 0.8
+          ? c.count
+          : null
+        : isNeutral(c) && c.lab.L > 0.35 && c.lab.L <= 0.72
+          ? c.count
+          : null,
+    );
 
   // Status BEFORE brand. A high-use red is almost always danger, not the brand
   // primary — and if we pick brand first it steals the red and leaves danger
@@ -1003,6 +1088,14 @@ let scales = report.findings.scale?.clusters || [];
 let paletteHues = report.findings.palette?.allHues || report.findings.palette?.hues || [];
 const declaredAll = (report.findings.declaredTokens || []).filter((d) => d.hex);
 let declaredTokens = declaredAll.filter((d) => (d.mode || "light") === themeMode);
+if (themeMode === "dark" && declaredTokens.length === 0 && declaredAll.length > 0) {
+  console.error(
+    `design-drift propose: this app declares a single default-mode system (${declaredAll.length} tokens) —\n` +
+      "  its dark identity lives there (color-scheme: dark, no .dark block).\n" +
+      "  Run without --mode.",
+  );
+  process.exit(2);
+}
 
 if (brand) {
   // Residuals: only hits on this brand's surfaces, re-aggregated from the
@@ -1099,6 +1192,26 @@ if (colorAll.length < 4 && scales.length === 0 && declaredTokens.length === 0) {
   );
   process.exit(2);
 }
+
+// The app's own polarity claim: color-scheme in the stylesheets that carry
+// its tokens (plus styles/*.css). The strongest polarity signal there is.
+const declaredScheme = (() => {
+  const files = new Set(declaredAll.map((d) => d.file));
+  try {
+    for (const e of readdirSync(join(root, "styles"))) if (e.endsWith(".css")) files.add(join("styles", e));
+  } catch {}
+  for (const f of files) {
+    let text;
+    try {
+      text = readFileSync(join(root, f), "utf8");
+    } catch {
+      continue;
+    }
+    const m = text.match(/color-scheme:\s*(dark|light)\b/);
+    if (m) return m[1];
+  }
+  return null;
+})();
 
 const clusters = shippedColors.length ? clusterColors(shippedColors, clusterTarget) : [];
 const declaredRoles = assignDeclaredRoles(declaredTokens);

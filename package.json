@@ -1,6 +1,6 @@
 {
   "name": "design-rails",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Guardrails that keep AI agents on YOUR design — derive your real design system from your code, decide it, wire it, and enforce it in CI.",
   "license": "MIT",
   "type": "module",

@@ -31,7 +31,7 @@
 */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const args = process.argv.slice(2);
@@ -54,7 +54,7 @@ if (!existsSync(reviewPath)) {
   console.error(`design-drift decide: no ${reviewPath} — run propose first, or point at an app dir with a design/.`);
   process.exit(2);
 }
-const review = readFileSync(reviewPath, "utf8");
+let review = readFileSync(reviewPath, "utf8");
 
 // Canvas + ink from the app's own tokens so samples render in the app's real
 // context, not on an assumed white. Falls back to a dual light/dark render.
@@ -268,9 +268,7 @@ function renderPage(d, ctx, appName) {
     </section>`,
     )
     .join("\n");
-  return `<!doctype html>
-<meta charset="utf-8">
-<title>${esc(d.title)} — ${esc(appName)} design decision</title>
+  return `<!doctype html>\n<!-- design-rails:decide -->\n<meta charset="utf-8">\n<title>${esc(d.title)} — ${esc(appName)} design decision</title>
 <style>
   body{font:15px/1.5 system-ui;margin:2rem auto;max-width:920px;padding:0 1rem;color:#1a1a1a}
   .options{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.2rem}
@@ -333,9 +331,7 @@ ${d.recommend ? `<div class="recommendation"><strong>Recommendation: <code>${esc
     n > 1
       ? `<nav><ul>${decisions.map((d) => `<li><a href="#${esc(d.slug)}">${esc(d.title)}</a></li>`).join("")}</ul></nav>`
       : "";
-  return `<!doctype html>
-<meta charset="utf-8">
-<title>${n} open design decision${n === 1 ? "" : "s"} — ${esc(appName)}</title>
+  return `<!doctype html>\n<!-- design-rails:decide -->\n<meta charset="utf-8">\n<title>${n} open design decision${n === 1 ? "" : "s"} — ${esc(appName)}</title>
 <style>
   body{font:15px/1.5 system-ui;margin:2rem auto;max-width:920px;padding:0 1rem;color:#1a1a1a}
   .options{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.2rem}
@@ -394,14 +390,89 @@ if (recordArg) {
     console.error("design-drift decide: --record wants <slug>=<option>");
     process.exit(2);
   }
-  writeFileSync(reviewPath, record(review, slug, option, rationale));
+  refuseSlugCollisions(parseDecisions(review));
+  const updated = record(review, slug, option, rationale);
+  writeFileSync(reviewPath, updated);
   console.log(`design-drift decide: recorded ${slug} = ${option} in ${reviewPath}`);
+  // Refresh the artifacts so nothing on disk still claims this is open.
+  review = updated;
+  const remaining = parseDecisions(updated);
+  if (existsSync(outDir)) {
+    pruneStale(remaining);
+    if (remaining.length) {
+      writeFileSync(join(outDir, "index.html"), renderIndex(remaining, appContext(), appName));
+      console.log(`design-drift decide: index refreshed (${remaining.length} still open)`);
+    }
+  }
   process.exit(0);
 }
 
+// Stale pages invite stale picks (#26): after a decision is recorded its
+// page and the old index still показывали it as open. decide owns exactly
+// index.html + <slug>.html for slugs present in REVIEW.md — prune the ones
+// that are no longer open, and keep the index truthful even at zero.
+function pruneStale(openDecisions) {
+  const openSlugs = new Set(openDecisions.map((d) => d.slug));
+  const allSlugs = new Set(
+    [...review.matchAll(/^### Decision: (.+?) \[(?:open|decided[^\]]*)\]\s*$/gm)].map((m) => slugify(m[1].trim())),
+  );
+  let pruned = 0;
+  for (const slug of allSlugs) {
+    if (openSlugs.has(slug)) continue;
+    const pg = join(outDir, `${slug}.html`);
+    if (existsSync(pg)) {
+      rmSync(pg);
+      pruned += 1;
+    }
+  }
+  // Renamed-while-open orphans: pages WE wrote (ownership marker) whose slug
+  // the current REVIEW.md no longer knows. Unmarked files are a human's and
+  // are never touched.
+  let entries = [];
+  try {
+    entries = readdirSync(outDir);
+  } catch {}
+  for (const e of entries) {
+    if (!e.endsWith(".html") || e === "index.html") continue;
+    const slug = e.slice(0, -5);
+    if (openSlugs.has(slug) || allSlugs.has(slug)) continue;
+    const fp = join(outDir, e);
+    try {
+      if (readFileSync(fp, "utf8").includes("design-rails:decide")) {
+        rmSync(fp);
+        pruned += 1;
+      }
+    } catch {}
+  }
+  if (openDecisions.length === 0 && existsSync(join(outDir, "index.html"))) {
+    writeFileSync(
+      join(outDir, "index.html"),
+      `<!doctype html>\n<!-- design-rails:decide -->\n<meta charset="utf-8">\n<title>0 open design decisions — ${esc(appName)}</title>\n<h1>0 open design decisions — ${esc(appName)}</h1>\n<p>Everything is recorded in <code>design/REVIEW.md</code>.</p>\n`,
+    );
+  }
+  if (pruned) console.log(`design-drift decide: pruned ${pruned} stale decision page${pruned === 1 ? "" : "s"}`);
+}
+
+function refuseSlugCollisions(list) {
+  const seen = new Map();
+  for (const d of list) {
+    if (seen.has(d.slug)) {
+      console.error(
+        `design-drift decide: decisions '${seen.get(d.slug)}' and '${d.title}' both slugify to '${d.slug}' —\n` +
+          "  every page, anchor and --record key is slug-addressed, so a collision\n" +
+          "  clobbers pages and records the wrong decision. Retitle one of them.",
+      );
+      process.exit(2);
+    }
+    seen.set(d.slug, d.title);
+  }
+}
+
 const decisions = parseDecisions(review);
+refuseSlugCollisions(decisions);
 if (!decisions.length) {
-  console.log("design-drift decide: no open decisions — nothing to render.");
+  if (existsSync(outDir)) pruneStale([]);
+  console.log("design-drift decide: no open decisions — artifacts pruned, index says so.");
   process.exit(0);
 }
 // An [open] decision whose options did not parse is a formatting slip, and a
@@ -420,6 +491,7 @@ if (optionless.length) {
 }
 const ctx = appContext();
 mkdirSync(outDir, { recursive: true });
+pruneStale(decisions);
 for (const d of decisions) {
   const p = join(outDir, `${d.slug}.html`);
   writeFileSync(p, renderPage(d, ctx, appName));
