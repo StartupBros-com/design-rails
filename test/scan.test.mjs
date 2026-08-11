@@ -1367,3 +1367,39 @@ test("notation identity: rgb()/hsl() drift resolves to hex identity (#12)", () =
     assert.equal(r.findings.color.occurrences, 6);
   });
 });
+
+test("uppercase RGB()/HSL() calls are counted and resolve (#29)", () => {
+  withTempProject((root) => {
+    write(root, "src/a.tsx", [
+      `const a = "RGB(255, 0, 0)";`,
+      `const b = "HSL(220, 45%, 22%)";`,
+      `const c = "rgb(255,0,0)";`,
+    ].join("\n"));
+    const r = scan(root);
+    assert.equal(r.findings.color.occurrences, 3, "case does not hide occurrences");
+    const values = Object.fromEntries(r.findings.color.top.map((t) => [t.value, t.count]));
+    assert.equal(values["#ff0000"], 2, "RGB() and rgb() are one identity");
+    assert.equal(values["#1f3051"], 1, "HSL() resolves");
+  });
+});
+
+test("type-scale contrast measures what ships; too little signal stays silent (#24)", () => {
+  withTempProject((root) => {
+    // A timid hierarchy: body 16, largest only 24 (ratio 1.5), plenty of samples.
+    const cls = [];
+    for (let i = 0; i < 15; i++) cls.push(`<p className="text-base">x</p>`);
+    for (let i = 0; i < 6; i++) cls.push(`<h2 className="text-2xl">t</h2>`);
+    for (let i = 0; i < 3; i++) cls.push(`<span className="text-sm">s</span>`);
+    for (let i = 0; i < 2; i++) cls.push(`<span className="text-lg">l</span>`);
+    write(root, "src/a.tsx", `export const A = () => <div>${cls.join("")}</div>;`);
+    const r = scan(root);
+    assert.equal(r.findings.typescale.body, 16);
+    assert.equal(r.findings.typescale.largest, 24);
+    assert.equal(r.findings.typescale.ratio, 1.5);
+    assert.match(r.findings.typescale.verdict, /timid/);
+    // Silence below the signal floor.
+    write(root, "src/a.tsx", `export const A = () => <p className="text-base">x</p>;`);
+    const r2 = scan(root);
+    assert.equal(r2.findings.typescale, undefined, "no verdict from thin evidence");
+  });
+});

@@ -358,7 +358,10 @@ const HEX = /#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{4}|[0-9a-fA-F]{3})(?![0
  *  drift. That leaves `#456`-shaped references as a known residual — comment
  *  stripping catches them everywhere except inside a string. */
 const isNumericReference = (body) => body.length === 4 && !/[a-f]/i.test(body);
-const FUNC_COLOR = /\b(rgba?|hsla?)\(\s*[0-9.]/g;
+// /i (#29): RGB()/HSL() calls were invisible to counting — a coverage gap
+// in occurrence detection itself, shipped as its own release because fixing
+// it CHANGES COUNTS (re-baseline budgets in the consuming pin-bump PR).
+const FUNC_COLOR = /\b(rgba?|hsla?)\(\s*[0-9.]/gi;
 
 // Context class per colour hit (#10). The safe migration substitution differs
 // per class, and two classes are var-FATAL: an SVG presentation attribute
@@ -404,6 +407,10 @@ const TW_PREFIX =
   "(?:bg|text|border|ring|ring-offset|fill|stroke|from|via|to|divide|outline|decoration|accent|caret|placeholder|shadow)";
 const TW_HUE =
   "(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)";
+// Tailwind's default type scale, for the type-scale contrast measure (#24).
+const TW_TEXT_PX = { xs: 12, sm: 14, base: 16, lg: 18, xl: 20, "2xl": 24, "3xl": 30, "4xl": 36, "5xl": 48, "6xl": 60, "7xl": 72, "8xl": 96, "9xl": 128 };
+const TW_TEXT_SIZE = /\btext-(xs|sm|base|lg|xl|[2-9]xl)\b/g;
+
 const PALETTE = new RegExp(`(?<![\\w-])(${TW_PREFIX})-(${TW_HUE})-(50|[1-9]00|950)\\b`, "g");
 
 // A value reached THROUGH a token is not a hardcode. `var(--x, #fff)` is a
@@ -608,7 +615,7 @@ function scanFile(abs) {
     return m ? parseIds(m[1]) : undefined;
   })();
 
-  const hits = { color: [], arbitrary: [], palette: [], varRefs: [], varDefs: [], declared: [] };
+  const hits = { color: [], arbitrary: [], palette: [], varRefs: [], varDefs: [], declared: [], fontSizes: [] };
   const isTokenFile = TOKEN_FILE.test(rel) || isTokenContent(text, rel);
   const isTestFile = TEST_FILE.test(rel);
   // Dark-block context for declared tokens: track brace depth; a dark opener
@@ -657,6 +664,19 @@ function scanFile(abs) {
       }
     }
 
+    // Type-scale samples (#24): Tailwind size classes, arbitrary text-[N],
+    // and plain font-size declarations, all normalized to px. clamp()/var()
+    // never match (the number must follow immediately), so fluid scales are
+    // simply not sampled rather than mis-read.
+    if (!isTokenFile) {
+      for (const m of code.matchAll(TW_TEXT_SIZE)) hits.fontSizes.push(TW_TEXT_PX[m[1]]);
+      for (const m of code.matchAll(/\btext-\[([\d.]+)(px|rem)\]/g)) {
+        hits.fontSizes.push(m[2] === "rem" ? parseFloat(m[1]) * 16 : parseFloat(m[1]));
+      }
+      for (const m of code.matchAll(/font-size:\s*([\d.]+)(px|rem)/g)) {
+        hits.fontSizes.push(m[2] === "rem" ? parseFloat(m[1]) * 16 : parseFloat(m[1]));
+      }
+    }
     if (!isTokenFile && !off("color") && !TOKEN_CTX.test(code)) {
       for (const m of code.matchAll(HEX)) {
         if (isNumericReference(m[1])) continue;
@@ -826,7 +846,35 @@ function analyse(files) {
     if (enabled(id)) HIT_FILES[id] = scope.first[id].map((h) => h.file);
   }
 
+  // Type-scale contrast (#24, the taste_audit measure): largest-heading ÷
+  // body size. Under 2.0 the hierarchy reads timid. INFO only — a
+  // measurement of what ships, never a budget.
+  const fontCounts = new Map();
+  for (const f of files) {
+    if (!f) continue;
+    for (const px of f.hits.fontSizes || []) fontCounts.set(px, (fontCounts.get(px) || 0) + 1);
+  }
+  const fontTotal = [...fontCounts.values()].reduce((a, b) => a + b, 0);
+  let typescale = null;
+  if (fontTotal >= 20 && fontCounts.size >= 4) {
+    const bodyCandidates = [...fontCounts.entries()].filter(([px]) => px >= 12 && px <= 20);
+    const body = bodyCandidates.sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+    const largest = Math.max(...[...fontCounts.entries()].filter(([, n]) => n >= 2).map(([px]) => px));
+    if (body && Number.isFinite(largest)) {
+      const ratio = +(largest / body).toFixed(2);
+      typescale = {
+        body,
+        largest,
+        ratio,
+        samples: fontTotal,
+        verdict: ratio < 2 ? "timid — the largest heading is under 2x body; the hierarchy whispers" : "healthy contrast",
+        top: [...fontCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([px, n]) => ({ px, count: n })),
+      };
+    }
+  }
+
   const report = { root, scanned: files.filter(Boolean).length, findings: {} };
+  if (typescale) report.findings.typescale = typescale;
 
   if (enabled("color")) {
     const hits = scope.first.color;
@@ -1246,6 +1294,14 @@ function render(r) {
       for (const e of f.orphan.top) out.push(`    ${String(e.count).padStart(5)}  ${e.name}  ${dim(e.at[0])}`);
       out.push(dim("      a local `style={{'--x': …}}` definition counts — confirm before renaming"));
     }
+    out.push("");
+  }
+
+  if (f.typescale) {
+    const t = f.typescale;
+    out.push(bold("type-scale contrast") + dim("  (largest heading ÷ body — under 2.0 reads timid)"));
+    out.push(`  body ${t.body}px · largest ${t.largest}px · ratio ${yellow(t.ratio)} — ${t.verdict}`);
+    out.push(dim(`    sizes in use: ${t.top.map((e) => `${e.px}px(${e.count})`).join(" ")} · ${t.samples} samples`));
     out.push("");
   }
 
