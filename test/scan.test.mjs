@@ -1403,3 +1403,143 @@ test("type-scale contrast measures what ships; too little signal stays silent (#
     assert.equal(r2.findings.typescale, undefined, "no verdict from thin evidence");
   });
 });
+
+test("motion census: shorthand delays excluded, tokens counted, band math", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/app.css",
+      [
+        ".a { transition: color 200ms ease-in-out 100ms; }", // 200 counted, 100 is a delay
+        ".b { transition: opacity .3s, transform 500ms 50ms; }", // 300 + 500, 50 is a delay
+        ".c { transition-duration: 150ms, 2s; }", // both are durations
+        ".d { animation: spin 1s linear infinite; }", // 1000
+        ".e { transition-delay: 999ms; }", // a delay alone is never a duration
+        ".f { transition-property: color; }", // no time at all
+      ].join("\n"),
+    );
+    write(root, "src/tokens.css", ":root { --transition-fast: 120ms; --duration-slow: .6s; }");
+    write(root, "src/b.tsx", `<div className="transition duration-300 hover:duration-[250ms]" />`);
+    const r = scan(root);
+    const m = r.findings.motion;
+    // 200, 300, 500, 150, 2000, 1000, 120, 600, 300, 250 — and never a delay
+    assert.equal(m.samples, 10);
+    assert.equal(m.distinct, 9);
+    assert.equal(m.inBand, 5); // 200, 300, 150, 300, 250
+    assert.equal(m.under, 1); // 120
+    assert.equal(m.over, 4); // 500, 2000, 1000, 600
+  });
+});
+
+test("motion census: below five samples says nothing", () => {
+  withTempProject((root) => {
+    write(root, "src/a.css", ".a { transition: color 200ms; } .b { transition: all 5s; }");
+    const r = scan(root);
+    assert.equal(r.findings.motion, undefined);
+  });
+});
+
+test("motion census: a --duration var NAME never reads as a Tailwind class", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/a.css",
+      [
+        ":root { --duration-200: var(--x); }", // no literal: nothing to count
+        ".a { transition: color 200ms; }",
+        ".b { transition: color 200ms; }",
+        ".c { transition: color 200ms; }",
+        ".d { transition: color 200ms; }",
+        ".e { transition: color 200ms; }",
+      ].join("\n"),
+    );
+    const r = scan(root);
+    assert.equal(r.findings.motion.samples, 5);
+    assert.equal(r.findings.motion.distinct, 1);
+  });
+});
+
+test("motion census honors design-drift-ignore-file", () => {
+  withTempProject((root) => {
+    write(root, "src/bench.css", "/* design-drift-ignore-file */\n" + ".a { transition: color 900ms; }\n".repeat(9));
+    const r = scan(root);
+    assert.equal(r.findings.motion, undefined);
+  });
+});
+
+test("touch targets: same-tag window, icon heights never masquerade", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/a.tsx",
+      [
+        `<button className="h-8 px-2">tiny</button>`, // 32px — under 44
+        `<button className="h-11 px-4">fine</button>`, // 44px — clean
+        `<button className="p-2"><Icon className="h-4 w-4" /></button>`, // icon OUTSIDE the tag window: unsampled
+        `<div role="button" className="h-5">chip</div>`, // 20px — under 24 too
+        `<button className="h-8 min-h-[44px]">floored</button>`, // max(32,44)=44 — clean
+        `<a className="h-6">link</a>`, // inline link: out of scope
+        `<button style="line-height: 24px">lh</button>`, // line-height is not a height: unsampled
+      ].join("\n"),
+    );
+    const r = scan(root);
+    const t = r.findings.touch;
+    assert.equal(t.samples, 4); // h-8, h-11, role-button h-5, floored
+    assert.equal(t.under44, 2);
+    assert.equal(t.under24, 1);
+    assert.equal(t.min, 20);
+    assert.equal(t.examples[0].px, 32);
+  });
+});
+
+test("touch targets: test-file buttons are not shipped targets", () => {
+  withTempProject((root) => {
+    write(root, "src/a.test.tsx", `<button className="h-4">fixture</button>`);
+    const r = scan(root);
+    assert.equal(r.findings.touch, undefined);
+  });
+});
+
+test("touch targets: two clean samples say nothing, one violation always speaks", () => {
+  withTempProject((root) => {
+    write(root, "src/a.tsx", `<button className="h-12">a</button>\n<button className="h-14">b</button>`);
+    assert.equal(scan(root).findings.touch, undefined);
+  });
+  withTempProject((root) => {
+    write(root, "src/a.tsx", `<button className="h-6">only</button>`);
+    const t = scan(root).findings.touch;
+    assert.equal(t.under44, 1);
+  });
+});
+
+test("dense files: a share-dominant DATA file trips the hint under 100 distinct", () => {
+  withTempProject((root) => {
+    const lines = [];
+    for (let i = 0; i < 40; i++) lines.push(`  c${i}: "#${(0x100000 + i * 7919).toString(16).slice(0, 6)}",`);
+    write(root, "src/design-themes.config.ts", `export const themes = {\n${lines.join("\n")}\n};`);
+    write(root, "src/app.tsx", `const edge = "#123456";`);
+    const r = scan(root);
+    assert.equal(r.findings.color.denseFiles.length, 1);
+    assert.match(r.findings.color.denseFiles[0].file, /design-themes\.config\.ts/);
+  });
+});
+
+test("dense files: a plain-CSS app's only stylesheet is drift, not a palette", () => {
+  withTempProject((root) => {
+    const lines = [];
+    for (let i = 0; i < 40; i++) lines.push(`.c${i} { color: #${(0x100000 + i * 7919).toString(16).slice(0, 6)}; }`);
+    write(root, "src/styles.css", lines.join("\n"));
+    const r = scan(root);
+    assert.equal(r.findings.color.denseFiles, undefined);
+  });
+});
+
+test("typescale honors design-drift-ignore-file (bench sizes are not hierarchy)", () => {
+  withTempProject((root) => {
+    const sizes = [12, 13, 14, 16, 24, 32];
+    const bench = sizes.map((px) => `.b { font-size: ${px}px; }`.repeat(4)).join("\n");
+    write(root, "src/bench.css", "/* design-drift-ignore-file */\n" + bench);
+    const r = scan(root);
+    assert.equal(r.findings.typescale, undefined);
+  });
+});
