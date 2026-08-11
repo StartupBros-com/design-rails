@@ -16,4 +16,14 @@ test("package.json and plugin.json versions move in lockstep (#3)", () => {
     plugin.version,
     `package.json ${pkg.version} != plugin.json ${plugin.version} — bump both in the release PR`,
   );
+  // VERSION joined the set when the shared Tool Drop announce train turned out
+  // to require it: every release from v0.2.0 through v0.12.0 failed to announce
+  // because this file did not exist, and a STALE one fails the same way (the
+  // train compares VERSION to plugin.json AND to the release tag).
+  const version = readFileSync(join(repo, "VERSION"), "utf8").trim();
+  assert.equal(
+    version,
+    pkg.version,
+    `VERSION ${version} != package.json ${pkg.version} — the release train refuses to announce on a mismatch`,
+  );
 });
