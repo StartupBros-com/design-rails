@@ -60,11 +60,31 @@ const review = readFileSync(reviewPath, "utf8");
 // context, not on an assumed white. Falls back to a dual light/dark render.
 function appContext() {
   const tokensPath = join(root, "design", "tokens", "color.json");
-  const ctx = { canvas: "#ffffff", ink: "#111114" };
+  const ctx = { canvas: "#ffffff", ink: "#111114", roles: null, logo: null };
   try {
     const c = JSON.parse(readFileSync(tokensPath, "utf8"));
-    ctx.canvas = c.primitive?.canvas?.$value || ctx.canvas;
-    ctx.ink = c.primitive?.ink?.$value || ctx.ink;
+    const prim = c.primitive || {};
+    const val = (k, fb) => prim[k]?.$value || fb;
+    ctx.canvas = val("canvas", ctx.canvas);
+    ctx.ink = val("ink", ctx.ink);
+    // The full brand, so a candidate is judged IN COMBINATION with every
+    // other role the app ships — a swatch beside a lone button reproduces
+    // judging-hex-in-prose one level up (operator finding).
+    ctx.roles = {
+      canvas: ctx.canvas,
+      elevated: val("canvas-elevated", ctx.canvas),
+      hairline: val("hairline", "#dddddd"),
+      ink: ctx.ink,
+      inkMute: val("ink-mute", "#666a70"),
+      brand: val("brand", "#4466dd"),
+    };
+  } catch {}
+  // Brand asset: design/assets/logo.svg, inlined when small. Absent is fine —
+  // the scene falls back to a wordmark in the brand colour.
+  try {
+    const logoPath = join(root, "design", "assets", "logo.svg");
+    const svg = readFileSync(logoPath, "utf8");
+    if (svg.length < 64 * 1024 && /<svg[\s>]/.test(svg)) ctx.logo = svg;
   } catch {}
   return ctx;
 }
@@ -85,6 +105,8 @@ function parseDecisions(md) {
     const end = rest.search(/^### |^## /m);
     const body = end === -1 ? rest : rest.slice(0, end);
     const kind = /^Kind:\s*chart\s*$/m.test(body) ? "chart" : "role";
+    const roleM = body.match(/^Role:\s*([a-zA-Z-]+)\s*$/m);
+    const role = roleM ? roleM[1] : null;
     const options = [];
     for (const om of body.matchAll(/^- \*\*Option ([A-Za-z0-9_-]+):\*\* (.+)$/gm)) {
       options.push({
@@ -96,8 +118,9 @@ function parseDecisions(md) {
     const evidence = [...body.matchAll(/^Evidence:\s*(.+)$/gm)].map((e) => e[1].trim());
     const context = (body.split(/^- \*\*Option /m)[0] || "")
       .replace(/^Kind:.*$/m, "")
+      .replace(/^Role:.*$/m, "")
       .trim();
-    decisions.push({ title, slug: slugify(title), kind, context, options, evidence, blockStart: start });
+    decisions.push({ title, slug: slugify(title), kind, role, context, options, evidence, blockStart: start });
   }
   return decisions;
 }
@@ -122,7 +145,50 @@ function sampleChart(colors, canvas) {
     ${bars}<polyline points="${pts}" fill="none" stroke="${col(1)}" stroke-width="2.5"/></svg>`;
 }
 
-function sampleRole(colors, ctx) {
+// The brand scene: a composed mini-page from the app's CURRENT tokens with
+// the candidate colour(s) substituted into the role under decision. One
+// variable, constant context — the combination view real decisions need.
+function sampleScene(colors, ctx, role) {
+  const r = { ...ctx.roles };
+  if (role && colors[0]) {
+    const slot = { "ink-mute": "inkMute", "canvas-elevated": "elevated" }[role] || role;
+    if (slot in r) r[slot] = colors[0];
+  }
+  // Multi-colour option with no single role: a neutral composition — the
+  // candidates fill tint / panel / border in order.
+  const comp = !role && colors.length >= 2;
+  const tint = comp ? colors[0] : r.elevated;
+  const panel = comp ? colors[1] : r.canvas;
+  const compBorder = comp ? colors[2] || r.hairline : r.hairline;
+  const logo = ctx.logo
+    ? `<span class="logo">${ctx.logo}</span>`
+    : `<strong style="color:${r.brand};font-size:15px">◆ Brand</strong>`;
+  return `
+    <div class="scene" style="background:${r.canvas};color:${r.ink};border:1px solid ${r.hairline}">
+      <div class="scene-h" style="border-bottom:1px solid ${r.hairline}">${logo}
+        <span style="color:${r.inkMute};font-size:12.5px">Products&ensp;Pricing&ensp;Docs</span></div>
+      <h3 style="color:${r.ink};margin:.7rem 0 .25rem;font-size:17px">Every colour, in company</h3>
+      <p style="color:${r.inkMute};margin:0 0 .6rem;font-size:13.5px">Body copy in the muted ink, beside
+        <a style="color:${r.brand}" href="#">a brand link</a>, so the candidate is judged against the palette it will live with.</p>
+      <div style="background:${tint};border:1px solid ${compBorder};border-radius:8px;padding:.6rem .8rem;margin-bottom:.6rem">
+        <div style="background:${panel};border:1px solid ${compBorder};border-radius:6px;padding:.45rem .6rem;font-size:12.5px;color:${r.inkMute}">A card on a tinted panel — where neutrals earn their keep.</div>
+      </div>
+      <button style="background:${r.brand};color:${pickText(r.brand)};border:none;border-radius:6px;padding:7px 16px;font-weight:600">Call to action</button>
+      <div class="swatches">${colors.map((x) => `<span class="sw" style="background:${x}" title="${x}"></span><code>${x}</code>`).join(" ")}</div>
+    </div>`;
+}
+
+// The palette strip: the brand as it stands, named — context above every choice.
+function paletteStrip(ctx) {
+  if (!ctx.roles) return "";
+  const names = { canvas: "canvas", elevated: "elevated", hairline: "hairline", ink: "ink", inkMute: "ink-mute", brand: "brand" };
+  return `<div class="strip"><strong>The brand today:</strong> ${Object.entries(ctx.roles)
+    .map(([k, v]) => `<span class="sw" style="background:${v}"></span><code>${names[k]}&thinsp;${v}</code>`)
+    .join(" ")}</div>`;
+}
+
+function sampleRole(colors, ctx, role) {
+  if (ctx.roles) return sampleScene(colors, ctx, role);
   const c = colors[0] || "#888888";
   return `
     <div class="ctx" style="background:${ctx.canvas};color:${ctx.ink}">
@@ -149,7 +215,7 @@ function renderPage(d, ctx, appName) {
       <h2>Option <code>${esc(o.name)}</code></h2>
       
       ${d.kind === "chart" ? sampleChart(o.colors, ctx.canvas) : ""}
-      ${sampleRole(o.colors, ctx)}
+      ${sampleRole(o.colors, ctx, d.role)}
       <p class="desc">${esc(o.desc)}</p>
     </section>`,
     )
@@ -167,7 +233,12 @@ function renderPage(d, ctx, appName) {
   .evidence{background:#f6f6f6;border-radius:8px;padding: .8rem 1rem;font-size:13.5px}
   svg{width:100%;height:auto;margin-bottom:.4rem}
   code{background:#f2f2f2;padding:1px 5px;border-radius:4px}
+  .scene{border-radius:10px;padding:.9rem 1rem;margin:.6rem 0}
+  .scene-h{display:flex;justify-content:space-between;align-items:center;padding-bottom:.5rem}
+  .scene .logo svg{height:20px;width:auto}
+  .strip{background:#f6f6f6;border-radius:8px;padding:.6rem .8rem;font-size:12.5px;margin:.6rem 0}
 </style>
+${paletteStrip(ctx)}
 <h1>${esc(d.title)} <small>[open]</small></h1>
 <p>${esc(d.context)}</p>
 <div class="options">${opts}</div>
@@ -188,7 +259,7 @@ function renderIndex(decisions, ctx, appName) {
     <section class="option">
       <h2>Option <code>${esc(o.name)}</code></h2>
       ${d.kind === "chart" ? sampleChart(o.colors, ctx.canvas) : ""}
-      ${sampleRole(o.colors, ctx)}
+      ${sampleRole(o.colors, ctx, d.role)}
       <p class="desc">${esc(o.desc)}</p>
     </section>`,
       )
@@ -220,10 +291,15 @@ function renderIndex(decisions, ctx, appName) {
   .evidence{background:#f6f6f6;border-radius:8px;padding:.8rem 1rem;font-size:13.5px}
   svg{width:100%;height:auto;margin-bottom:.4rem}
   code{background:#f2f2f2;padding:1px 5px;border-radius:4px}
+  .scene{border-radius:10px;padding:.9rem 1rem;margin:.6rem 0}
+  .scene-h{display:flex;justify-content:space-between;align-items:center;padding-bottom:.5rem}
+  .scene .logo svg{height:20px;width:auto}
+  .strip{background:#f6f6f6;border-radius:8px;padding:.6rem .8rem;font-size:12.5px;margin:.6rem 0}
   section[id]{border-top:2px solid #eee;margin-top:2rem;padding-top:.6rem}
   .dtitle{font-size:1.35rem}
 </style>
 <h1>${n} open design decision${n === 1 ? "" : "s"} — ${esc(appName)}</h1>
+${paletteStrip(ctx)}
 ${nav}
 ${decisions.map(section).join("\n")}`;
 }

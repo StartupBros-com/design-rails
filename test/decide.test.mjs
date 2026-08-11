@@ -187,3 +187,73 @@ test("--open never fails the run when no opener exists (#20)", () => {
     assert.match(r.stdout, /open the index path above by hand/);
   });
 });
+
+test("the brand scene composes the candidate WITH the app's other colours (operator finding)", () => {
+  withApp((root) => {
+    // Full token palette: the scene must show every role around the candidate.
+    write(root, "design/tokens/color.json", JSON.stringify({
+      primitive: {
+        canvas: { $value: "#ffffff" },
+        "canvas-elevated": { $value: "#fbfbfc" },
+        hairline: { $value: "#e1e7ef" },
+        ink: { $value: "#182c56" },
+        "ink-mute": { $value: "#65758b" },
+        brand: { $value: "#f73e49" },
+      },
+    }));
+    write(root, "design/REVIEW.md", [
+      "### Decision: muted text [open]",
+      "Role: ink-mute",
+      "Which gray carries body copy.",
+      "- **Option candidate:** body copy moves to #6f7592",
+      "Evidence: 85 uses",
+    ].join("\n"));
+    const r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    const page = readFileSync(join(root, "design", "decisions", "muted-text.html"), "utf8");
+    // Candidate substituted into the ROLE slot…
+    assert.match(page, /Body copy in the muted ink/);
+    assert.match(page, /color:#6f7592/, "candidate sits in the ink-mute slot");
+    // …surrounded by the REST of the brand, unchanged.
+    assert.match(page, /#f73e49/, "brand red present in the scene");
+    assert.match(page, /#182c56/, "ink present in the scene");
+    assert.match(page, /#e1e7ef/, "hairline present in the scene");
+    assert.match(page, /The brand today:/, "palette strip names the current roles");
+  });
+});
+
+test("a multi-colour option becomes a neutral composition; a logo asset inlines when present", () => {
+  withApp((root) => {
+    write(root, "design/tokens/color.json", JSON.stringify({
+      primitive: { canvas: { $value: "#ffffff" }, ink: { $value: "#111111" }, brand: { $value: "#3355ff" } },
+    }));
+    write(root, "design/assets/logo.svg", `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle r="5" cx="5" cy="5"/></svg>`);
+    write(root, "design/REVIEW.md", [
+      "### Decision: gray ramp [open]",
+      "How many grays.",
+      "- **Option ramp:** #fafafa then #ededed then #cecece",
+      "Evidence: soup",
+    ].join("\n"));
+    const r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    const page = readFileSync(join(root, "design", "decisions", "gray-ramp.html"), "utf8");
+    assert.match(page, /background:#fafafa/, "first candidate tints the panel area");
+    assert.match(page, /background:#ededed/, "second candidate is the card");
+    assert.match(page, /border:1px solid #cecece/, "third candidate is the border");
+    assert.match(page, /<svg xmlns/, "logo asset inlined in the scene");
+  });
+});
+
+test("without a token palette the thin sample still renders (fallback intact)", () => {
+  withApp((root) => {
+    write(root, "design/REVIEW.md", [
+      "### Decision: bare [open]",
+      "- **Option x:** #aa1111",
+      "Evidence: e",
+    ].join("\n"));
+    const r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    const page = readFileSync(join(root, "design", "decisions", "bare.html"), "utf8");
+    assert.match(page, /candidate colour/, "pre-scene sample still works");
+  });
+});
