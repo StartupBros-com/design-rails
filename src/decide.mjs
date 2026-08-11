@@ -107,6 +107,8 @@ function parseDecisions(md) {
     const kind = /^Kind:\s*chart\s*$/m.test(body) ? "chart" : "role";
     const roleM = body.match(/^Role:\s*([a-zA-Z-]+)\s*$/m);
     const role = roleM ? roleM[1] : null;
+    const recM = body.match(/^Recommend:\s*([A-Za-z0-9_-]+)\s*(?:—|-|:)\s*(.+)$/m);
+    const recommend = recM ? { option: recM[1], reason: recM[2].trim() } : null;
     const options = [];
     for (const om of body.matchAll(/^- \*\*Option ([A-Za-z0-9_-]+):\*\* (.+)$/gm)) {
       options.push({
@@ -119,8 +121,9 @@ function parseDecisions(md) {
     const context = (body.split(/^- \*\*Option /m)[0] || "")
       .replace(/^Kind:.*$/m, "")
       .replace(/^Role:.*$/m, "")
+      .replace(/^Recommend:.*$/m, "")
       .trim();
-    decisions.push({ title, slug: slugify(title), kind, role, context, options, evidence, blockStart: start });
+    decisions.push({ title, slug: slugify(title), kind, role, recommend, context, options, evidence, blockStart: start });
   }
   return decisions;
 }
@@ -198,6 +201,51 @@ function sampleRole(colors, ctx, role) {
     </div>`;
 }
 
+// WCAG relative luminance + contrast ratio — the objective half of a
+// recommendation. A tool cannot have taste, but it can measure, and the
+// measurements belong ON the page (operator finding: a decision page
+// without a best-practice read leaves the human doing the designer's
+// arithmetic by eye).
+function relLum(hex) {
+  const h = hex.length === 4 ? [...hex.slice(1)].map((c) => c + c).join("") : hex.slice(1);
+  const n = parseInt(h, 16);
+  const ch = (v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * ch((n >> 16) & 255) + 0.7152 * ch((n >> 8) & 255) + 0.0722 * ch(n & 255);
+}
+function contrastRatio(a, b) {
+  const la = relLum(a);
+  const lb = relLum(b);
+  const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+  return (hi + 0.05) / (lo + 0.05);
+}
+// Metrics per option: text roles get canvas contrast + the AA verdict WITH
+// its headroom (a 4.53:1 pass has 0.03 to spare and dies on the first
+// tinted surface); every candidate gets perceptibility vs the role's
+// CURRENT value (≈1.0:1 means nobody will see the change).
+function metricsRow(colors, ctx, role) {
+  if (!ctx.roles || !colors.length) return "";
+  const c = colors[0];
+  const bits = [];
+  const textRole = role && /ink|text/.test(role);
+  if (textRole) {
+    const cr = contrastRatio(c, ctx.roles.canvas);
+    const aa = cr >= 4.5;
+    bits.push(
+      `contrast on canvas ${cr.toFixed(2)}:1 — AA body ${aa ? `PASS (headroom ${(cr - 4.5).toFixed(2)})` : "FAIL"}`,
+    );
+  }
+  const slot = role ? ({ "ink-mute": "inkMute", "canvas-elevated": "elevated" }[role] || role) : null;
+  const current = slot && ctx.roles[slot];
+  if (current && current.toLowerCase() !== c.toLowerCase()) {
+    const d = contrastRatio(c, current);
+    bits.push(`vs current ${current}: ${d.toFixed(2)}:1 ${d < 1.1 ? "(imperceptible)" : d < 1.3 ? "(subtle)" : "(visible)"}`);
+  }
+  return bits.length ? `<div class="metrics">Measured: ${bits.join(" · ")}</div>` : "";
+}
+
 /** Black-or-white text over a colour, by relative luminance — the sample
  *  button must be readable or the page itself misleads. */
 function pickText(hex) {
@@ -211,11 +259,11 @@ function renderPage(d, ctx, appName) {
   const opts = d.options
     .map(
       (o) => `
-    <section class="option">
-      <h2>Option <code>${esc(o.name)}</code></h2>
-      
+    <section class="option${d.recommend && d.recommend.option === o.name ? " recommended" : ""}">
+      <h2>Option <code>${esc(o.name)}</code>${d.recommend && d.recommend.option === o.name ? ' <span class="recbadge">recommended</span>' : ""}</h2>
       ${d.kind === "chart" ? sampleChart(o.colors, ctx.canvas) : ""}
       ${sampleRole(o.colors, ctx, d.role)}
+      ${metricsRow(o.colors, ctx, d.role)}
       <p class="desc">${esc(o.desc)}</p>
     </section>`,
     )
@@ -237,11 +285,16 @@ function renderPage(d, ctx, appName) {
   .scene-h{display:flex;justify-content:space-between;align-items:center;padding-bottom:.5rem}
   .scene .logo svg{height:20px;width:auto}
   .strip{background:#f6f6f6;border-radius:8px;padding:.6rem .8rem;font-size:12.5px;margin:.6rem 0}
+  .option.recommended{border:2px solid #2f7d4f;box-shadow:0 1px 6px rgba(47,125,79,.18)}
+  .recbadge{background:#2f7d4f;color:#fff;border-radius:99px;font-size:11px;padding:2px 9px;vertical-align:middle;font-weight:600}
+  .recommendation{background:#eef7f1;border:1px solid #bfe0cc;border-radius:8px;padding:.7rem 1rem;margin:.8rem 0;font-size:14px}
+  .metrics{font-size:12px;color:#4a4f57;background:#f8f8f8;border-radius:6px;padding:.35rem .6rem;margin-top:.5rem}
 </style>
 ${paletteStrip(ctx)}
 <h1>${esc(d.title)} <small>[open]</small></h1>
 <p>${esc(d.context)}</p>
 <div class="options">${opts}</div>
+${d.recommend ? `<div class="recommendation"><strong>Recommendation: <code>${esc(d.recommend.option)}</code></strong> — ${esc(d.recommend.reason)}</div>` : ""}
 <div class="evidence"><strong>Evidence</strong><ul>${d.evidence.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>
 <p>Record with: <code>node decide.mjs ${esc(appName)} --record ${esc(d.slug)}=&lt;option&gt; --rationale="…"</code></p>
 `;
@@ -256,10 +309,11 @@ function renderIndex(decisions, ctx, appName) {
     const opts = d.options
       .map(
         (o) => `
-    <section class="option">
-      <h2>Option <code>${esc(o.name)}</code></h2>
+    <section class="option${d.recommend && d.recommend.option === o.name ? " recommended" : ""}">
+      <h2>Option <code>${esc(o.name)}</code>${d.recommend && d.recommend.option === o.name ? ' <span class="recbadge">recommended</span>' : ""}</h2>
       ${d.kind === "chart" ? sampleChart(o.colors, ctx.canvas) : ""}
       ${sampleRole(o.colors, ctx, d.role)}
+      ${metricsRow(o.colors, ctx, d.role)}
       <p class="desc">${esc(o.desc)}</p>
     </section>`,
       )
@@ -269,6 +323,7 @@ function renderIndex(decisions, ctx, appName) {
 <h2 class="dtitle">${esc(d.title)} <small>[open]</small></h2>
 <p>${esc(d.context)}</p>
 <div class="options">${opts}</div>
+${d.recommend ? `<div class="recommendation"><strong>Recommendation: <code>${esc(d.recommend.option)}</code></strong> — ${esc(d.recommend.reason)}</div>` : ""}
 <div class="evidence"><strong>Evidence</strong><ul>${d.evidence.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>
 <p>Record with: <code>node decide.mjs ${esc(appName)} --record ${esc(d.slug)}=&lt;option&gt; --rationale="…"</code></p>
 </section>`;
@@ -295,6 +350,10 @@ function renderIndex(decisions, ctx, appName) {
   .scene-h{display:flex;justify-content:space-between;align-items:center;padding-bottom:.5rem}
   .scene .logo svg{height:20px;width:auto}
   .strip{background:#f6f6f6;border-radius:8px;padding:.6rem .8rem;font-size:12.5px;margin:.6rem 0}
+  .option.recommended{border:2px solid #2f7d4f;box-shadow:0 1px 6px rgba(47,125,79,.18)}
+  .recbadge{background:#2f7d4f;color:#fff;border-radius:99px;font-size:11px;padding:2px 9px;vertical-align:middle;font-weight:600}
+  .recommendation{background:#eef7f1;border:1px solid #bfe0cc;border-radius:8px;padding:.7rem 1rem;margin:.8rem 0;font-size:14px}
+  .metrics{font-size:12px;color:#4a4f57;background:#f8f8f8;border-radius:6px;padding:.35rem .6rem;margin-top:.5rem}
   section[id]{border-top:2px solid #eee;margin-top:2rem;padding-top:.6rem}
   .dtitle{font-size:1.35rem}
 </style>
