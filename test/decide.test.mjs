@@ -65,7 +65,11 @@ test("renders one page per OPEN decision, with in-context samples and evidence",
     const r = decide(root);
     assert.equal(r.status, 0, r.stderr);
     const files = readdirSync(join(root, "design", "decisions")).sort();
-    assert.deepEqual(files, ["charts-palette.html", "success-token.html"], "decided blocks get no page");
+    assert.deepEqual(
+      files,
+      ["charts-palette.html", "index.html", "success-token.html"],
+      "decided blocks get no page; the unified index joins the per-decision artifacts",
+    );
 
     const chart = readFileSync(join(root, "design", "decisions", "charts-palette.html"), "utf8");
     // The load-bearing assertions (#274 planted negative): a chart decision
@@ -152,5 +156,34 @@ test("an open decision with zero parsed options refuses loudly (dogfood catch)",
     assert.match(r.stderr, /cta lime/);
     assert.match(r.stderr, /\*\*Option <name>:\*\*/);
     assert.ok(!existsSync(join(root, "design", "decisions", "cta-lime.html")), "no empty page written");
+  });
+});
+
+test("a unified index page carries every open decision — one page per operator moment (#20)", () => {
+  withApp((root) => {
+    seedReview(root);
+    const r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /index\.html — the ONE page to open \(2 open decisions\)/);
+    const idx = readFileSync(join(root, "design", "decisions", "index.html"), "utf8");
+    assert.match(idx, /id="charts-palette"/);
+    assert.match(idx, /id="success-token"/);
+    assert.match(idx, /href="#charts-palette"/, "nav anchors when more than one decision");
+    assert.doesNotMatch(idx, /already settled/, "decided blocks stay off the index");
+    // Per-decision pages remain the durable artifacts.
+    assert.ok(existsSync(join(root, "design", "decisions", "charts-palette.html")));
+  });
+});
+
+test("--open never fails the run when no opener exists (#20)", () => {
+  withApp((root) => {
+    seedReview(root);
+    const r = spawnSync(process.execPath, [decidePath, root, "--open"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: "/nonexistent-bin" },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /index\.html/);
+    assert.match(r.stdout, /open the index path above by hand/);
   });
 });
