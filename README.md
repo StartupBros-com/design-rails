@@ -9,7 +9,7 @@ lints the one you wrote. **design-rails runs the whole loop against your actual
 codebase** — and keeps it true after you leave.
 
 ```
-npx -y "github:StartupBros-com/design-rails#v0.2.0" posture .
+npx -y "github:StartupBros-com/design-rails#v0.12.1" posture .
 ```
 
 ```
@@ -56,13 +56,25 @@ Every claim below is dated and was produced by running, not asserting:
 See `docs/validation.md` for methods and `docs/upstream-limits.md` for the
 dated list of `@google/design.md` v0.4.0 CLI behaviors this tool compensates for.
 
+## Install
+
+As a Claude Code plugin (two steps, from inside Claude Code):
+
+```
+/plugin marketplace add https://github.com/StartupBros-com/hov-marketplace.git
+/plugin install design-rails@hov
+```
+
+That installs the skill — the agent then runs the verbs below for you. To use
+the CLI directly instead, no install is needed; see Quick start.
+
 ## Quick start
 
 Run it pinned from GitHub — the bare `design-rails` name is unclaimed on npm,
 so an unpinned `npx design-rails` is a supply-chain bet, not an install:
 
 ```bash
-alias design-rails='npx -y "github:StartupBros-com/design-rails#v0.2.0"'
+alias design-rails='npx -y "github:StartupBros-com/design-rails#v0.12.1"'
 
 # 1. Where do you stand?
 design-rails posture .
