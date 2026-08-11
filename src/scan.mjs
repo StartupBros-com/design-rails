@@ -671,9 +671,29 @@ function scanFile(abs) {
         });
       }
       for (const m of code.matchAll(FUNC_COLOR)) {
+        // Notation identity (#12): rgba(57,255,20,.15) IS #39ff14 — resolve
+        // the full call so notation variants join one identity and token
+        // matching can see them. FUNC_COLOR stays the occurrence driver
+        // (identical hit sites by construction); resolution is best-effort
+        // on the flat-args call extracted from the tail, and anything with
+        // nested parens or junk keeps the legacy "rgba()" bucket.
+        let value = m[1].toLowerCase() + "()";
+        const call = code.slice(m.index).match(/^(rgba?|hsla?)\(([^()]*)\)/i);
+        if (call) {
+          const hex = resolveDeclaredColor(`${call[1]}(${call[2]})`);
+          if (hex) {
+            const args = call[2].split(/[\s,/]+/).filter(Boolean);
+            let alpha = null;
+            if (args.length > 3) {
+              const a = args[3].endsWith("%") ? parseFloat(args[3]) / 100 : parseFloat(args[3]);
+              if (Number.isFinite(a) && a < 1) alpha = +a.toFixed(2);
+            }
+            value = alpha !== null ? `${hex}@${alpha}` : hex;
+          }
+        }
         hits.color.push({
           line: i + 1,
-          value: m[1].toLowerCase() + "()",
+          value,
           kind: "func",
           ctx: classifyContext(code, m.index),
           test: isTestFile,

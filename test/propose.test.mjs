@@ -635,3 +635,97 @@ test("--brand failure modes are loud: unknown brand, null system without --out, 
     assert.match(r.stderr, /not a declared, resolvable token/);
   });
 });
+
+test("dark-canvas polarity assigns structural roles on a dark system (#27)", () => {
+  withTemp((root) => {
+    const many = (hex, n) => Array.from({ length: n }, (_, i) => `const c${hex.slice(1)}_${i} = "${hex}";`).join("\n");
+    write(root, "src/dark.tsx", [
+      many("#0a0a0c", 15),   // canvas: heavy near-black
+      many("#e5e5e7", 8),    // ink: light neutral
+      many("#26262e", 5),    // elevated: dark panel
+      many("#4a4a55", 4),    // hairline: mid-dark border
+      many("#39ff14", 12),   // chromatic brand
+    ].join("\n"));
+    const r = propose(root, "--out=" + join(root, "design"));
+    assert.equal(r.status, 0, r.stderr);
+    const md = readFileSync(join(root, "design", "DESIGN.md"), "utf8");
+    assert.match(md, /surface\.canvas: "#0a0a0c"/, "dark canvas assigned, not abstained");
+    assert.match(md, /text\.primary: "#e5e5e7"/, "light ink on a dark system");
+    assert.match(md, /surface\.elevated: "#26262e"/);
+    assert.match(md, /border\.default: "#4a4a55"/);
+  });
+});
+
+test("--mode=dark on a single-default-mode app hints instead of dying obscurely (#28)", () => {
+  withTemp((root) => {
+    write(root, "styles/theme.css", ":root {\n  --color-brand: #39ff14;\n  --color-bg: #0a0a0c;\n  --color-fg: #e5e5e5;\n}\n");
+    write(root, "src/a.tsx", `const a = "#39ff14";`);
+    const r = propose(root, "--mode=dark");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /single default-mode system \(3 tokens\)/);
+    assert.match(r.stderr, /Run without --mode/);
+  });
+});
+
+test("a text-heavy LIGHT app never flips to dark polarity (adversarial repro)", () => {
+  withTemp((root) => {
+    const many = (hex, n) => Array.from({ length: n }, (_, i) => `const x${hex.slice(1)}_${i} = "${hex}";`).join("\n");
+    // 100x dark text vs 65x light surfaces — raw mass says dark, reality says light.
+    write(root, "src/light.tsx", [
+      many("#111111", 100),
+      many("#ffffff", 20),
+      many("#e0e0e0", 30),
+      many("#f5f5f5", 15),
+      many("#3355ff", 10),
+    ].join("\n"));
+    const r = propose(root, "--out=" + join(root, "design"));
+    assert.equal(r.status, 0, r.stderr);
+    const md = readFileSync(join(root, "design", "DESIGN.md"), "utf8");
+    assert.match(md, /surface\.canvas: "#ffffff"/, "light canvas stays canvas");
+    assert.match(md, /text\.primary: "#111111"/, "dark text stays ink");
+  });
+});
+
+test("color-scheme: dark in the stylesheet decides polarity outright", () => {
+  withTemp((root) => {
+    write(root, "styles/globals.css", "html { color-scheme: dark; }\n:root { --color-brand: #39ff14; }\n");
+    const many = (hex, n) => Array.from({ length: n }, (_, i) => `const y${hex.slice(1)}_${i} = "${hex}";`).join("\n");
+    // Mass alone would NOT clear the 2x dominance bar (10 dark vs 8 light) —
+    // the declaration is what settles it.
+    write(root, "src/a.tsx", [many("#0b0b0e", 10), many("#ececef", 8)].join("\n"));
+    const r = propose(root, "--out=" + join(root, "design"));
+    assert.equal(r.status, 0, r.stderr);
+    const md = readFileSync(join(root, "design", "DESIGN.md"), "utf8");
+    assert.match(md, /surface\.canvas: "#0b0b0e"/, "declared scheme wins polarity");
+  });
+});
+
+test("dark canvas is the DARKEST substantial neutral, not the most popular panel (adversarial repro)", () => {
+  withTemp((root) => {
+    write(root, "styles/globals.css", "html { color-scheme: dark; }\n");
+    const many = (hex, n) => Array.from({ length: n }, (_, i) => `const z${hex.slice(1)}_${i} = "${hex}";`).join("\n");
+    write(root, "src/a.tsx", [
+      many("#030303", 20),   // the true canvas: near-black, modest count
+      many("#26262e", 150),  // popular panel INSIDE the old overlap window
+      many("#e5e5e7", 30),
+      many("#c13333", 12),
+    ].join("\n"));
+    const r = propose(root, "--out=" + join(root, "design"));
+    assert.equal(r.status, 0, r.stderr);
+    const md = readFileSync(join(root, "design", "DESIGN.md"), "utf8");
+    assert.match(md, /surface\.canvas: "#030303"/, "depth beats popularity for canvas");
+    assert.match(md, /surface\.elevated: "#26262e"/, "the popular panel is the elevated surface");
+  });
+});
+
+test("a component-scoped background token (--sidebar-bg) cannot claim the app canvas", () => {
+  withTemp((root) => {
+    write(root, "styles/theme.css", ":root {\n  --sidebar-bg: #10131a;\n  --page-text: #222222;\n}\n");
+    const many = (hex, n) => Array.from({ length: n }, (_, i) => `const w${hex.slice(1)}_${i} = "${hex}";`).join("\n");
+    write(root, "src/a.tsx", [many("#ffffff", 20), many("#222222", 10), many("#4466dd", 8)].join("\n"));
+    const r = propose(root, "--out=" + join(root, "design"));
+    assert.equal(r.status, 0, r.stderr);
+    const md = readFileSync(join(root, "design", "DESIGN.md"), "utf8");
+    assert.match(md, /surface\.canvas: "#ffffff"/, "the app canvas is the light residual, not the sidebar's dark");
+  });
+});
