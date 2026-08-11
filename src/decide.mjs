@@ -32,6 +32,10 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+
+// Generated artifacts must be byte-clean: trailing whitespace in emitted HTML
+// fails strict `git diff --check` gates (#35, found on a real repo's PR gate).
+const tidy = (html) => html.split("\n").map((l) => l.trimEnd()).join("\n");
 import { join, resolve } from "node:path";
 
 const args = process.argv.slice(2);
@@ -400,7 +404,7 @@ if (recordArg) {
   if (existsSync(outDir)) {
     pruneStale(remaining);
     if (remaining.length) {
-      writeFileSync(join(outDir, "index.html"), renderIndex(remaining, appContext(), appName));
+      writeFileSync(join(outDir, "index.html"), tidy(renderIndex(remaining, appContext(), appName)));
       console.log(`design-drift decide: index refreshed (${remaining.length} still open)`);
     }
   }
@@ -447,7 +451,7 @@ function pruneStale(openDecisions) {
   if (openDecisions.length === 0 && existsSync(join(outDir, "index.html"))) {
     writeFileSync(
       join(outDir, "index.html"),
-      `<!doctype html>\n<!-- design-rails:decide -->\n<meta charset="utf-8">\n<title>0 open design decisions — ${esc(appName)}</title>\n<h1>0 open design decisions — ${esc(appName)}</h1>\n<p>Everything is recorded in <code>design/REVIEW.md</code>.</p>\n`,
+      tidy(`<!doctype html>\n<!-- design-rails:decide -->\n<meta charset="utf-8">\n<title>0 open design decisions — ${esc(appName)}</title>\n<h1>0 open design decisions — ${esc(appName)}</h1>\n<p>Everything is recorded in <code>design/REVIEW.md</code>.</p>\n`),
     );
   }
   if (pruned) console.log(`design-drift decide: pruned ${pruned} stale decision page${pruned === 1 ? "" : "s"}`);
@@ -494,23 +498,40 @@ mkdirSync(outDir, { recursive: true });
 pruneStale(decisions);
 for (const d of decisions) {
   const p = join(outDir, `${d.slug}.html`);
-  writeFileSync(p, renderPage(d, ctx, appName));
+  writeFileSync(p, tidy(renderPage(d, ctx, appName)));
   console.log(`design-drift decide: wrote ${p} (${d.options.length} options, kind=${d.kind})`);
 }
 const indexPath = join(outDir, "index.html");
-writeFileSync(indexPath, renderIndex(decisions, ctx, appName));
+writeFileSync(indexPath, tidy(renderIndex(decisions, ctx, appName)));
 console.log(`design-drift decide: wrote ${indexPath} — the ONE page to open (${decisions.length} open decision${decisions.length === 1 ? "" : "s"})`);
 
-// --open (#20): best-effort launch of the unified page. Openers fail silently
-// on some hosts (WSL interop wedges), so the path above ALWAYS prints and an
-// opener failure is never an error.
+// --open (#20, #36): best-effort launch of the unified page. Openers fail
+// silently on some hosts, so an opener failure is never an error — but the
+// fallback hint must be a path the human can actually USE. On WSL the browser
+// lives on Windows: xdg-open has no handler, wslview is a wslu extra that may
+// not exist, and the Linux path is unpasteable in a Windows browser. So on
+// WSL we construct the \\wsl.localhost UNC form, PRINT it unconditionally,
+// and try explorer.exe with it (always present; NOTE it exits 1 even on
+// success, so it can never gate the hint).
 if (args.includes("--open")) {
+  const wslDistro =
+    process.env.WSL_DISTRO_NAME ||
+    (process.platform === "linux" &&
+    existsSync("/proc/version") &&
+    /microsoft/i.test(readFileSync("/proc/version", "utf8"))
+      ? "Ubuntu"
+      : null);
+  const uncPath = wslDistro
+    ? `\\\\wsl.localhost\\${wslDistro}${resolve(indexPath).replaceAll("/", "\\")}`
+    : null;
   const candidates =
     process.platform === "darwin"
       ? [["open", [indexPath]]]
       : process.platform === "win32"
         ? [["cmd", ["/c", "start", "", indexPath]]]
-        : [["xdg-open", [indexPath]], ["wslview", [indexPath]]];
+        : wslDistro
+          ? [["wslview", [indexPath]], ["xdg-open", [indexPath]]]
+          : [["xdg-open", [indexPath]], ["wslview", [indexPath]]];
   let opened = false;
   for (const [cmd, argv] of candidates) {
     const r = spawnSync(cmd, argv, { stdio: "ignore", timeout: 5000 });
@@ -519,5 +540,14 @@ if (args.includes("--open")) {
       break;
     }
   }
-  if (!opened) console.log("design-drift decide: no opener worked here — open the index path above by hand");
+  if (!opened && uncPath) {
+    // Fire-and-forget: explorer.exe opens the default browser for .html but
+    // exits 1 regardless, so it proves nothing and gates nothing.
+    spawnSync("explorer.exe", [uncPath], { stdio: "ignore", timeout: 5000 });
+  }
+  if (uncPath) {
+    console.log(`design-drift decide: if no tab appeared, paste into your Windows browser:\n  ${uncPath}`);
+  } else if (!opened) {
+    console.log("design-drift decide: no opener worked here — open the index path above by hand");
+  }
 }

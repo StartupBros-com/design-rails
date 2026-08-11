@@ -184,7 +184,7 @@ test("--open never fails the run when no opener exists (#20)", () => {
     });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /index\.html/);
-    assert.match(r.stdout, /open the index path above by hand/);
+    assert.match(r.stdout, /open the index path above by hand|paste into your Windows browser/);
   });
 });
 
@@ -362,5 +362,40 @@ test("a renamed-while-open decision's orphan page is reclaimed; human files neve
     assert.ok(!existsSync(join(root, "design", "decisions", "old-title.html")), "orphan reclaimed by marker");
     assert.ok(existsSync(join(root, "design", "decisions", "new-title.html")));
     assert.ok(existsSync(join(root, "design", "decisions", "notes.html")), "unmarked human file untouched");
+  });
+});
+
+test("emitted pages are byte-clean: no trailing whitespace to trip diff --check gates (#35)", () => {
+  withApp((root) => {
+    seedReview(root);
+    const r = decide(root);
+    assert.equal(r.status, 0, r.stderr);
+    for (const f of readdirSync(join(root, "design", "decisions"))) {
+      const html = readFileSync(join(root, "design", "decisions", f), "utf8");
+      assert.equal(/[ \t]+$/m.test(html), false, `${f} has trailing whitespace`);
+    }
+  });
+});
+
+test("--open on WSL prints the pasteable \\\\wsl.localhost UNC path unconditionally (#36)", () => {
+  withApp((root) => {
+    seedReview(root);
+    const r = spawnSync(process.execPath, [decidePath, root, "--open"], {
+      encoding: "utf8",
+      env: { ...process.env, WSL_DISTRO_NAME: "Ubuntu" },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\\\\wsl\.localhost\\Ubuntu\\.*index\.html/);
+    assert.match(r.stdout, /paste into your Windows browser/);
+  });
+});
+
+test("--open off-WSL keeps the old fallback hint and never fails", () => {
+  withApp((root) => {
+    seedReview(root);
+    const env = { ...process.env, PATH: "/nonexistent" };
+    delete env.WSL_DISTRO_NAME;
+    const r = spawnSync(process.execPath, [decidePath, root, "--open"], { encoding: "utf8", env });
+    assert.equal(r.status, 0, r.stderr);
   });
 });
