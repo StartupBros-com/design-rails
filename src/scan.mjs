@@ -629,6 +629,12 @@ function scanFile(abs) {
   // mode:"dark". Theme files are structurally simple CSS, which is what makes
   // line-based brace counting sufficient here.
   let braceDepth = 0, darkAt = -1;
+  // Carry-over buffers for value lists and JSX tags that wrap onto following
+  // lines — line-at-a-time scanning otherwise reads prettier's default
+  // formatting as "no motion, no buttons". Both are hard-capped at 8 lines:
+  // an unterminated carry is dropped without a claim, never guessed at.
+  let motionCarry = null;
+  let touchCarry = null;
 
   let nextIgnore;
   for (let i = 0; i < lines.length; i++) {
@@ -688,72 +694,148 @@ function scanFile(abs) {
 
     // Motion durations (#24): the census of every duration that ships.
     // Sources, in order, each blanking what it consumed so nothing counts
-    // twice: longhand *-duration props (every <time> is a duration), shorthand
-    // transition:/animation: (first <time> per comma segment — the CSS grammar
-    // makes the second one a delay), duration-ish custom-property definitions,
-    // then Tailwind duration utilities on whatever text remains. Token files
-    // are IN scope here (the issue names declared --transition tokens as a
-    // source). Framer-motion's unitless `duration: 0.3` is deliberately
-    // unsampled — JS animation config, not CSS — rather than guessed at.
+    // twice: longhand *-duration props (every <time> is a duration), React
+    // inline-style camelCase longhand with real units in a quoted string,
+    // shorthand transition:/animation: (first <time> per comma segment — the
+    // CSS grammar makes the second one a delay), duration-ish custom-property
+    // definitions, then Tailwind duration utilities on whatever text remains.
+    // Token files are IN scope (the issue names declared --transition tokens
+    // as a source). A shorthand whose value list wraps onto following lines
+    // (transition:\n  color .2s,\n  ...) is carried to its ;/} terminator and
+    // parsed once, attributed to the opener line — the fleet reproduced
+    // wrapped multi-property transitions reading as zero motion. Framer-
+    // motion's unitless `duration: 0.3` stays deliberately unsampled — JS
+    // animation config, not CSS — rather than guessed at.
     if (!off("motion")) {
-      let rest = code;
-      const pushMs = (num, unit) =>
-        hits.motion.push({
-          line: i + 1,
-          ms: Math.round(parseFloat(num) * (unit === "s" ? 1000 : 1)),
-          text: line.trim().slice(0, 120),
+      const extractMotion = (text, lineNo, srcLine) => {
+        let rest = text;
+        const pushMs = (num, unit) =>
+          hits.motion.push({
+            line: lineNo,
+            ms: Math.round(parseFloat(num) * (unit === "s" ? 1000 : 1)),
+            text: srcLine.trim().slice(0, 120),
+          });
+        const eat = (re, take) => {
+          rest = rest.replace(re, (...m) => {
+            take(m);
+            return " ".repeat(m[0].length);
+          });
+        };
+        eat(/\b(?:transition|animation)-duration\s*:\s*([^;{}"'\n]*)/gi, (m) => {
+          for (const t of m[1].matchAll(TIME_ALL) || []) pushMs(t[1], t[2]);
         });
-      const eat = (re, take) => {
-        rest = rest.replace(re, (...m) => {
-          take(m);
-          return " ".repeat(m[0].length);
+        eat(/\b(?:transition|animation)Duration\s*:\s*["']([^"']*)["']/g, (m) => {
+          for (const t of m[1].matchAll(TIME_ALL) || []) pushMs(t[1], t[2]);
         });
-      };
-      eat(/\b(?:transition|animation)-duration\s*:\s*([^;{}"'\n]*)/gi, (m) => {
-        for (const t of m[1].matchAll(TIME_ALL) || []) pushMs(t[1], t[2]);
-      });
-      eat(/\b(?:transition|animation)\s*:\s*([^;{}"'\n]*)/gi, (m) => {
-        for (const seg of m[1].split(",")) {
-          const t = seg.match(TIME_ONE);
-          if (t) pushMs(t[1], t[2]);
+        eat(/\b(?:transition|animation)\s*:\s*([^;{}"'\n]*)/gi, (m) => {
+          for (const seg of m[1].split(",")) {
+            const t = seg.match(TIME_ONE);
+            if (t) pushMs(t[1], t[2]);
+          }
+        });
+        eat(/--[\w-]*(?:duration|transition|motion)[\w-]*\s*:\s*([\d.]+)(ms|s)\b/gi, (m) => pushMs(m[1], m[2]));
+        for (const t of rest.matchAll(/(?<!-)\bduration-(\d+)\b/g)) {
+          hits.motion.push({ line: lineNo, ms: +t[1], text: srcLine.trim().slice(0, 120) });
         }
-      });
-      eat(/--[\w-]*(?:duration|transition|motion)[\w-]*\s*:\s*([\d.]+)(ms|s)\b/gi, (m) => pushMs(m[1], m[2]));
-      for (const t of rest.matchAll(/(?<!-)\bduration-(\d+)\b/g)) {
-        hits.motion.push({ line: i + 1, ms: +t[1], text: line.trim().slice(0, 120) });
+        for (const t of rest.matchAll(/(?<!-)\bduration-\[([\d.]+)(ms|s)\]/g)) pushMs(t[1], t[2]);
+      };
+      if (motionCarry) {
+        motionCarry.text += " " + code;
+        motionCarry.budget -= 1;
+        if (/[;}]/.test(code)) {
+          extractMotion(motionCarry.text, motionCarry.line, motionCarry.src);
+          motionCarry = null;
+        } else if (motionCarry.budget <= 0) motionCarry = null;
+      } else if (/\b(?:transition|animation)(?:-duration)?\s*:[^;{}]*$/i.test(code)) {
+        motionCarry = { text: code, line: i + 1, src: line, budget: 8 };
+      } else {
+        extractMotion(code, i + 1, line);
       }
-      for (const t of rest.matchAll(/(?<!-)\bduration-\[([\d.]+)(ms|s)\]/g)) pushMs(t[1], t[2]);
     }
 
+
     // Touch targets (#24): explicit heights on interactive elements, same-tag
-    // only. The window runs from the opener to its `>` so an icon's h-4 inside
-    // a button can never masquerade as the button's height. Multi-line tags
-    // are simply not sampled — "where static" means precision over recall.
-    // Test files excluded: a fixture button is not a shipped target. Effective
-    // height is the max of every source in the window (min-height floors the
-    // box; a max-height cap genuinely bounds it, so counting it can only
-    // under-claim, never over-claim). Inline <a> is out of scope by design —
-    // WCAG 2.5.8 exempts targets in text flow.
+    // window. The window runs from the opener to its real `>` — an arrow
+    // function's `=>` never terminates it — so an icon's h-4 inside a button
+    // can never masquerade as the button's height. A tag whose attributes
+    // wrap onto following lines (prettier's default past a couple of props)
+    // is carried to its `>` and measured once, attributed to the opener line.
+    // Test files excluded: a fixture button is not a shipped target.
+    //
+    // Effective height follows CSS resolution: min-height beats max-height
+    // beats height. A max-h cap SMALLER than the declared height binds the
+    // box, so it must WIN the arithmetic, not lose it (the fleet reproduced
+    // h-20 max-h-6 reading as 80px "safe"; the real box is 24px). When only
+    // an unbounded side is visible — a floor under 44, a cap at or over 44 —
+    // the real height is unknowable and NO claim is recorded. A bare
+    // comparison `>` inside a prop expression still truncates the window;
+    // that residual only drops sources and is accepted as rare. Inline <a>
+    // stays out of scope: WCAG 2.5.8 exempts targets in text flow.
     if (!isTestFile && !off("touch")) {
-      const openers = new Set();
-      for (const m of code.matchAll(/<button\b/gi)) openers.add(m.index);
-      for (const m of code.matchAll(/role=["']button["']/g)) {
-        const lt = code.lastIndexOf("<", m.index);
-        if (lt !== -1) openers.add(lt);
-      }
-      for (const at of openers) {
-        const gt = code.indexOf(">", at);
-        const win = code.slice(at, gt === -1 ? code.length : gt);
-        const px = [];
-        for (const m of win.matchAll(/\b(?:h|size|min-h|max-h)-(\d+)\b/g)) px.push(+m[1] * 4);
-        for (const m of win.matchAll(/\b(?:h|size|min-h|max-h)-\[([\d.]+)(px|rem)\]/g)) {
-          px.push(m[2] === "rem" ? parseFloat(m[1]) * 16 : parseFloat(m[1]));
+      const tagEnd = (str, from) => {
+        let gt = str.indexOf(">", from);
+        while (gt > 0 && str[gt - 1] === "=") gt = str.indexOf(">", gt + 1);
+        return gt;
+      };
+      const measureTag = (win, lineNo, srcLine) => {
+        const hard = [], floors = [], caps = [];
+        const put = (kind, v) => (kind === "min" ? floors : kind === "max" ? caps : hard).push(v);
+        for (const m of win.matchAll(/\b(min-h|max-h|h|size)-(\d+(?:\.5)?)\b/g)) {
+          put(m[1] === "min-h" ? "min" : m[1] === "max-h" ? "max" : "h", parseFloat(m[2]) * 4);
         }
-        for (const m of win.matchAll(/(?<![\w-])(?:min-|max-)?height:\s*([\d.]+)px/g)) px.push(parseFloat(m[1]));
-        if (px.length) hits.touch.push({ line: i + 1, px: Math.max(...px), text: line.trim().slice(0, 120) });
+        for (const m of win.matchAll(/\b(min-h|max-h|h|size)-\[([\d.]+)(px|rem)\]/g)) {
+          put(m[1] === "min-h" ? "min" : m[1] === "max-h" ? "max" : "h", m[3] === "rem" ? parseFloat(m[2]) * 16 : parseFloat(m[2]));
+        }
+        for (const m of win.matchAll(/(?<![\w-])(min-|max-)?height:\s*["']?([\d.]+)(?:px)?["']?(?![\w.])/g)) {
+          put(m[1] === "min-" ? "min" : m[1] === "max-" ? "max" : "h", parseFloat(m[2]));
+        }
+        for (const m of win.matchAll(/\b(min|max)Height:\s*["']?([\d.]+)(?:px)?["']?(?![\w.])/g)) {
+          put(m[1], parseFloat(m[2]));
+        }
+        let eff;
+        if (hard.length) {
+          eff = Math.max(...hard);
+          if (caps.length) eff = Math.min(eff, Math.min(...caps));
+          if (floors.length) eff = Math.max(eff, Math.max(...floors));
+        } else if (floors.length) {
+          const fl = Math.max(...floors);
+          if (fl < 44) return; // floor only bounds from below: height unknown
+          eff = fl;
+        } else if (caps.length) {
+          const cap = Math.min(...caps);
+          if (cap >= 44) return; // cap only bounds from above: height unknown
+          eff = cap;
+        } else return;
+        hits.touch.push({ line: lineNo, px: eff, text: srcLine.trim().slice(0, 120) });
+      };
+      if (touchCarry) {
+        touchCarry.text += " " + code;
+        touchCarry.budget -= 1;
+        const gt = tagEnd(touchCarry.text, touchCarry.at);
+        if (gt !== -1) {
+          measureTag(touchCarry.text.slice(touchCarry.at, gt), touchCarry.line, touchCarry.src);
+          touchCarry = null;
+        } else if (touchCarry.budget <= 0) touchCarry = null;
       }
-    }
-    if (!isTokenFile && !off("color") && !TOKEN_CTX.test(code)) {
+      if (!touchCarry) {
+        const starts = new Set();
+        for (const m of code.matchAll(/<button\b/gi)) starts.add(m.index);
+        for (const m of code.matchAll(/role=["']button["']/g)) {
+          // backtrack to the nearest OPENING tag — `</div` must never anchor
+          // a window (the fleet's hijack repro)
+          let lt = code.lastIndexOf("<", m.index);
+          while (lt !== -1 && !/[A-Za-z]/.test(code[lt + 1] || "")) {
+            lt = lt > 0 ? code.lastIndexOf("<", lt - 1) : -1;
+          }
+          if (lt !== -1) starts.add(lt);
+        }
+        for (const at of [...starts].sort((a, b) => a - b)) {
+          const gt = tagEnd(code, at);
+          if (gt !== -1) measureTag(code.slice(at, gt), i + 1, line);
+          else touchCarry = { text: code, at, line: i + 1, src: line, budget: 8 };
+        }
+      }
+    }    if (!isTokenFile && !off("color") && !TOKEN_CTX.test(code)) {
       for (const m of code.matchAll(HEX)) {
         if (isNumericReference(m[1])) continue;
         hits.color.push({
@@ -1042,17 +1124,22 @@ function analyse(files) {
     }
     // distinct > 100 already implies the file has 100+ hits, so no separate
     // total-hits floor is needed (a floor here read as if it did work).
-    // Second clause: colour-as-data. A non-stylesheet file (config module,
-    // JSON) holding ~all of the colour is the palette/bench signal even under
-    // 100 distinct. Stylesheets are exempt on purpose — in a plain-CSS app the
-    // one stylesheet holds 100% of colour BY CONSTRUCTION and its literals are
-    // real drift, not a palette (a real scan nearly mislabelled exactly that).
-    const STYLESHEET = /\.(css|scss|sass|less|styl)$/i;
+    // Stylesheets are exempt from BOTH clauses: in a plain-CSS app the one
+    // stylesheet holds ~all colour BY CONSTRUCTION and its literals are real
+    // drift, not a palette (a real scan nearly mislabelled exactly that), and
+    // a genuinely token-declaring stylesheet is already caught upstream by
+    // token-file detection. The exemption covers stylesheet-as-code too:
+    // vanilla-extract .css.ts and styled-components *.styles.ts are styling
+    // surfaces, not data. What remains — a config module or JSON holding most
+    // of the colour — is the palette/bench signal, at >100 distinct on
+    // ordinary share or >=30 distinct when the file is share-dominant.
+    const STYLESHEET = /(\.(css|scss|sass|less|styl)(\.(ts|js))?|\.styles\.[jt]sx?)$/i;
     const denseFiles = [...perFile.entries()]
       .filter(
         ([file, e]) =>
-          (e.occurrences / hits.length > 0.5 && e.values.size > 100) ||
-          (e.occurrences / hits.length >= 0.9 && e.values.size >= 30 && !STYLESHEET.test(file)),
+          !STYLESHEET.test(file) &&
+          ((e.occurrences / hits.length > 0.5 && e.values.size > 100) ||
+            (e.occurrences / hits.length >= 0.9 && e.values.size >= 30)),
       )
       .map(([file, e]) => ({ file, occurrences: e.occurrences, distinct: e.values.size }));
     report.findings.color = {

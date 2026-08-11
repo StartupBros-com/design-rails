@@ -1543,3 +1543,119 @@ test("typescale honors design-drift-ignore-file (bench sizes are not hierarchy)"
     assert.equal(r.findings.typescale, undefined);
   });
 });
+
+test("motion census: a wrapped multi-property shorthand is carried, not zeroed (fleet)", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/a.css",
+      ".a {\n  transition:\n    color 3s ease,\n    transform 3s ease;\n}\n.b {\n  transition:\n    opacity 3s ease,\n    box-shadow 3s ease;\n}\n.c {\n  transition:\n    color 3s ease,\n    transform 3s ease;\n}\n",
+    );
+    const m = scan(root).findings.motion;
+    assert.equal(m.samples, 6);
+    assert.equal(m.over, 6);
+    assert.equal(m.top[0].ms, 3000);
+  });
+});
+
+test("motion census: React camelCase transitionDuration with real units counts (fleet)", () => {
+  withTempProject((root) => {
+    const lines = ["A", "B", "C", "D", "E"].map(
+      (n) => `export function ${n}() { return <div style={{ transitionDuration: "300ms" }}>${n}</div>; }`,
+    );
+    write(root, "src/a.jsx", lines.join("\n"));
+    const m = scan(root).findings.motion;
+    assert.equal(m.samples, 5);
+    assert.equal(m.inBand, 5);
+  });
+});
+
+test("touch targets: a max-height cap smaller than the height BINDS the box (fleet)", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/a.jsx",
+      [
+        `<button className="h-20 max-h-6">capped</button>`, // real box 24px — violation
+        `<button className="h-16 max-h-6">capped2</button>`,
+        `<button className="h-16 max-h-6">capped3</button>`,
+      ].join("\n"),
+    );
+    const t = scan(root).findings.touch;
+    assert.equal(t.under44, 3);
+    assert.equal(t.min, 24);
+  });
+});
+
+test("touch targets: an unbounded floor or cap alone records NO claim", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/a.jsx",
+      [
+        `<button className="min-h-8">floor under 44: height unknowable</button>`,
+        `<button className="max-h-16">cap over 44: height unknowable</button>`,
+        `<button className="min-h-12">floor at 48: provably tall enough</button>`,
+        `<button className="max-h-6">cap at 24: provably too short</button>`,
+      ].join("\n"),
+    );
+    const t = scan(root).findings.touch;
+    assert.equal(t.samples, 2); // only the two provable ones
+    assert.equal(t.under44, 1); // the 24px cap
+    assert.equal(t.min, 24);
+  });
+});
+
+test("touch targets: a prettier-wrapped multi-line tag is carried to its > (fleet)", () => {
+  withTempProject((root) => {
+    write(
+      root,
+      "src/a.jsx",
+      'export function A() {\n  return (\n    <button\n      className="h-6 w-6 p-0"\n      onClick={() => {}}\n    >\n      X\n    </button>\n  );\n}\n',
+    );
+    const t = scan(root).findings.touch;
+    assert.equal(t.under44, 1);
+    assert.equal(t.min, 24);
+    assert.equal(t.examples[0].at, "src/a.jsx:3"); // attributed to the opener line
+  });
+});
+
+test("touch targets: an arrow function's => never terminates the tag window (fleet)", () => {
+  withTempProject((root) => {
+    write(root, "src/a.jsx", `<button onClick={() => go()} className="h-6">x</button>`);
+    const t = scan(root).findings.touch;
+    assert.equal(t.under44, 1);
+    assert.equal(t.min, 24);
+  });
+});
+
+test("touch targets: role backtrack refuses a closing tag as its anchor (fleet)", () => {
+  withTempProject((root) => {
+    // no opening tag before role= on the line: must record nothing, not junk
+    write(root, "src/a.jsx", `</div> role="button" className="h-5"`);
+    assert.equal(scan(root).findings.touch, undefined);
+  });
+});
+
+test("touch targets: fractional Tailwind heights resolve exactly (fleet)", () => {
+  withTempProject((root) => {
+    write(root, "src/a.jsx", `<button className="h-2.5">dot</button>`);
+    const t = scan(root).findings.touch;
+    assert.equal(t.min, 10); // h-2.5 = 10px, not h-2's 8px
+  });
+});
+
+test("dense files: stylesheets are exempt from BOTH clauses, styles-as-code too (fleet)", () => {
+  const many = (n) => Array.from({ length: n }, (_, i) => `#${(0x100000 + i * 7).toString(16).padStart(6, "0")}`);
+  withTempProject((root) => {
+    // 110 distinct in the app's ONLY stylesheet — clause 1 territory, exempt
+    write(root, "src/app.css", many(110).map((c, i) => `.c${i} { color: ${c}; }`).join("\n"));
+    assert.equal(scan(root).findings.color.denseFiles, undefined);
+  });
+  withTempProject((root) => {
+    // vanilla-extract stylesheet-as-code: exempt
+    write(root, "src/app.css.ts", `export const x = [${many(40).map((c) => `"${c}"`).join(",")}];`);
+    write(root, "src/other.tsx", `const a = "#123456";`);
+    assert.equal(scan(root).findings.color.denseFiles, undefined);
+  });
+});
