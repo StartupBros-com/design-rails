@@ -5,8 +5,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
-const hardenedSha = "08f7d22f3a5b59b1658ab2e96a20d0d3c352869c";
-const retiredSha = "c981b872ebf650805200ad72c8b7142232f8b3f6";
+const hardenedSha = "66e197874fe627f3d5f58dff49737e7747d20bfe";
+const retiredSha = "08f7d22f3a5b59b1658ab2e96a20d0d3c352869c";
 const expectedWorkflow = `name: Release train
 
 # Announce-only Tool Drop train, shared across the whole hov catalog.
