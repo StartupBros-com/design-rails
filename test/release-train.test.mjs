@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   announce:
-    uses: StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml@${hardenedSha} # fix: bind Tool Drop intent to the promoted release
+    uses: StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml@${hardenedSha} # fix: retry the promotion-propagation 403
 `;
 
 function validateReleaseTrain(workflow) {
