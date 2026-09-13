@@ -382,7 +382,8 @@ test("--open on WSL prints the pasteable \\\\wsl.localhost UNC path unconditiona
     seedReview(root);
     const r = spawnSync(process.execPath, [decidePath, root, "--open"], {
       encoding: "utf8",
-      env: { ...process.env, WSL_DISTRO_NAME: "Ubuntu" },
+      // Test the printed path, never launch a browser for a disposable fixture.
+      env: { ...process.env, WSL_DISTRO_NAME: "Ubuntu", PATH: "/nonexistent-bin" },
     });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /\\\\wsl\.localhost\\Ubuntu\\.*index\.html/);
