@@ -1,6 +1,6 @@
+import { withTempDirectory, write } from "./helpers/fixtures.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -10,20 +10,8 @@ const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const proposePath = join(dir, "propose.mjs");
 const scanPath = join(dir, "scan.mjs");
 
-function withTemp(run) {
-  const root = mkdtempSync(join(tmpdir(), "dd-propose-"));
-  try {
-    return run(root);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
+const withTemp = (run) => withTempDirectory("dd-propose-", run);
 
-function write(root, rel, body) {
-  const abs = join(root, rel);
-  mkdirSync(dirname(abs), { recursive: true });
-  writeFileSync(abs, body);
-}
 
 function propose(root, ...flags) {
   return spawnSync(process.execPath, [proposePath, root, ...flags], {

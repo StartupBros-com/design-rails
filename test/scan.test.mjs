@@ -1,5 +1,6 @@
+import { withTempDirectory, write } from "./helpers/fixtures.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -8,20 +9,8 @@ import { fileURLToPath } from "node:url";
 
 const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "scan.mjs");
 
-function withTempProject(run) {
-  const project = mkdtempSync(join(tmpdir(), "design-drift-"));
-  try {
-    return run(project);
-  } finally {
-    rmSync(project, { recursive: true, force: true });
-  }
-}
+const withTempProject = (run) => withTempDirectory("design-drift-", run);
 
-function write(root, rel, body) {
-  const abs = join(root, rel);
-  mkdirSync(dirname(abs), { recursive: true });
-  writeFileSync(abs, body);
-}
 
 function scan(root, ...args) {
   const result = spawnSync("node", [scriptPath, root, "--json", ...args], { encoding: "utf8" });
