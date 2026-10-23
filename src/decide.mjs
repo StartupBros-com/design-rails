@@ -506,6 +506,12 @@ console.log(`design-drift decide: wrote ${indexPath} — the ONE page to open ($
 // WSL we construct the \\wsl.localhost UNC form, PRINT it unconditionally,
 // and try explorer.exe with it (always present; NOTE it exits 1 even on
 // success, so it can never gate the hint).
+//
+// DESIGN_RAILS_OPENER names a command to try before the platform chain, for
+// hosts that already have their own file opener. It gets the index path as its
+// only argument and runs without a shell; exit 0 counts as opened, and any
+// other result (missing command, a "no viewer here" exit) falls through to the
+// chain below.
 if (args.includes("--open")) {
   const wslDistro =
     process.env.WSL_DISTRO_NAME ||
@@ -517,14 +523,17 @@ if (args.includes("--open")) {
   const uncPath = wslDistro
     ? `\\\\wsl.localhost\\${wslDistro}${resolve(indexPath).replaceAll("/", "\\")}`
     : null;
-  const candidates =
-    process.platform === "darwin"
+  const preferred = (process.env.DESIGN_RAILS_OPENER || "").trim();
+  const candidates = [
+    ...(preferred ? [[preferred, [indexPath]]] : []),
+    ...(process.platform === "darwin"
       ? [["open", [indexPath]]]
       : process.platform === "win32"
         ? [["cmd", ["/c", "start", "", indexPath]]]
         : wslDistro
           ? [["wslview", [indexPath]], ["xdg-open", [indexPath]]]
-          : [["xdg-open", [indexPath]], ["wslview", [indexPath]]];
+          : [["xdg-open", [indexPath]], ["wslview", [indexPath]]]),
+  ];
   let opened = false;
   for (const [cmd, argv] of candidates) {
     const r = spawnSync(cmd, argv, { stdio: "ignore", timeout: 5000 });
