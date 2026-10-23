@@ -5,8 +5,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
-const hardenedSha = "66e197874fe627f3d5f58dff49737e7747d20bfe";
-const retiredSha = "08f7d22f3a5b59b1658ab2e96a20d0d3c352869c";
+const hardenedSha = "41bb6f811f1c1ad65f62c1ef32e696c60fb1d8c3";
+const retiredSha = "66e197874fe627f3d5f58dff49737e7747d20bfe";
 const expectedWorkflow = `name: Release train
 
 # Announce-only Tool Drop train, shared across the whole hov catalog.
@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   announce:
-    uses: StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml@${hardenedSha} # fix: retry the promotion-propagation 403
+    uses: StartupBros-com/hov-marketplace/.github/workflows/hov-tool-drop-announce.yml@${hardenedSha} # feat: prefix-aware announce guard, card-source helper, prefix-scoped releases
 `;
 
 function validateReleaseTrain(workflow) {
