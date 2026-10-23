@@ -1,6 +1,6 @@
+import { withTempDirectory, write } from "./helpers/fixtures.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -8,20 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const posturePath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "posture.mjs");
 
-function withRoot(run) {
-  const root = mkdtempSync(join(tmpdir(), "dd-posture-"));
-  try {
-    return run(root);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
+const withRoot = (run) => withTempDirectory("dd-posture-", run);
 
-function write(root, rel, body) {
-  const abs = join(root, rel);
-  mkdirSync(dirname(abs), { recursive: true });
-  writeFileSync(abs, body);
-}
 
 const posture = (root, ...flags) =>
   spawnSync(process.execPath, [posturePath, root, "--json", ...flags], { encoding: "utf8" });
