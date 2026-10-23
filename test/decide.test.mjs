@@ -1,6 +1,6 @@
+import { withTempDirectory, write } from "./helpers/fixtures.mjs";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -8,20 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const decidePath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "decide.mjs");
 
-function withApp(run) {
-  const root = mkdtempSync(join(tmpdir(), "dd-decide-"));
-  try {
-    return run(root);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
+const withApp = (run) => withTempDirectory("dd-decide-", run);
 
-function write(root, rel, body) {
-  const abs = join(root, rel);
-  mkdirSync(dirname(abs), { recursive: true });
-  writeFileSync(abs, body);
-}
 
 const decide = (root, ...flags) =>
   spawnSync(process.execPath, [decidePath, root, ...flags], { encoding: "utf8" });
