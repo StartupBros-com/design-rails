@@ -10,10 +10,16 @@
     valid     frontmatter carries real colour tokens (structural; the official
               `designmd lint` is the deeper manual pass — remember it scores an
               EMPTY frontmatter clean, which is why this check exists at all)
-    wired     the app's agent instructions name design/DESIGN.md, and CLAUDE.md
-              exists so Claude Code loads them (@AGENTS.md pointer counts) — a
-              DESIGN.md no agent reads is inert; that exact miss survived two
-              days of tooling work on the repo that motivated this tool
+    wired     the app's agent instructions name design/DESIGN.md AND Claude
+              Code actually loads them: the app has its own CLAUDE.md (an
+              @AGENTS.md pointer counts), or it has an AGENTS.md with no
+              project CLAUDE.md anywhere on the path above it (the user-scope
+              ~/.claude/CLAUDE.md is exempt), which Claude Code 2.1.277+
+              reads directly. An AGENTS.md under an ancestor
+              CLAUDE.md never loads (the engine attaches only nested files
+              named CLAUDE.md) — a DESIGN.md no agent reads is inert; that
+              exact miss survived two days of tooling work on the repo that
+              motivated this tool
     followed  INFO: the app's current raw-colour / palette-utility counts —
               the trend line migrations move
     enforced  a CI workflow runs the scanner with --fail-on budgets
@@ -26,6 +32,7 @@
 */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -82,6 +89,35 @@ function bearsUi(app) {
   return false;
 }
 
+// Claude Code 2.1.277+ reads an AGENTS.md directly only when no CLAUDE.md,
+// .claude/CLAUDE.md, or CLAUDE.local.md exists in the working directory or ANY
+// ancestor up to the filesystem root. One such file anywhere on the path keeps
+// the engine on the CLAUDE.md path for the whole project, and the engine then
+// attaches nested instruction files named CLAUDE.md only — so a nested
+// AGENTS.md with no sibling pointer is dead content. Returns the nearest such
+// file at or above `dir`, or null.
+//
+// The one file on that walk that does NOT count is the user-scope
+// ~/.claude/CLAUDE.md (or $CLAUDE_CONFIG_DIR/CLAUDE.md): the engine loads it
+// as personal instructions in every session, and the plugin exempts it from
+// the check. Without this exemption every repo under $HOME reads as blocked,
+// because the walk passes $HOME and finds $HOME/.claude/CLAUDE.md there.
+const CLAUDE_MD_NAMES = ["CLAUDE.md", join(".claude", "CLAUDE.md"), "CLAUDE.local.md"];
+const USER_CLAUDE_MD = resolve(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "CLAUDE.md");
+function claudeMdOnPath(dir) {
+  let d = dir;
+  for (;;) {
+    for (const name of CLAUDE_MD_NAMES) {
+      const p = join(d, name);
+      if (resolve(p) === USER_CLAUDE_MD) continue;
+      if (existsSync(p)) return p;
+    }
+    const parent = dirname(d);
+    if (parent === d) return null;
+    d = parent;
+  }
+}
+
 function checkApp(app, repoRoot) {
   const rows = [];
   const designMd = join(app, "design", "DESIGN.md");
@@ -105,19 +141,27 @@ function checkApp(app, repoRoot) {
         : "n/a — no file",
   });
 
-  const agents = read(join(app, "AGENTS.md")) || "";
+  const agents = read(join(app, "AGENTS.md"));
   const claudeMd = read(join(app, "CLAUDE.md"));
-  const mentions = /design\/DESIGN\.md/.test(agents) || /design\/DESIGN\.md/.test(claudeMd || "");
-  const claudeLoads = claudeMd !== null;
+  const mentions = /design\/DESIGN\.md/.test(agents || "") || /design\/DESIGN\.md/.test(claudeMd || "");
+  // With no CLAUDE.md of its own, the app's AGENTS.md loads directly only if
+  // nothing CLAUDE.md-shaped sits on the path from the app up to the root.
+  const blocker = claudeMd === null && agents !== null ? claudeMdOnPath(app) : null;
+  const agentsLoads = claudeMd === null && agents !== null && blocker === null;
+  const claudeLoads = claudeMd !== null || agentsLoads;
   const wired = mentions && claudeLoads;
   rows.push({
     check: "wired",
     pass: wired,
     note: wired
-      ? "AGENTS.md names it; CLAUDE.md present"
+      ? claudeMd !== null
+        ? "AGENTS.md names it; CLAUDE.md present"
+        : "AGENTS.md names it; no CLAUDE.md on the path, so Claude Code 2.1.277+ loads AGENTS.md directly"
       : !mentions
         ? "agent instructions never mention design/DESIGN.md — the file is inert"
-        : "no CLAUDE.md — Claude Code will not load the instructions (add an @AGENTS.md pointer)",
+        : blocker
+          ? `no CLAUDE.md here and ${relative(app, blocker) || blocker} keeps Claude Code on the CLAUDE.md path — this AGENTS.md never loads (add an @AGENTS.md pointer)`
+          : "no CLAUDE.md — Claude Code will not load the instructions (add an @AGENTS.md pointer)",
   });
 
   // Brand scopes (#9): an app with design/brands.json is a multi-brand

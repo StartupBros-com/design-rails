@@ -60,7 +60,9 @@ role matcher can read (`--color-hov`).
    open decision in `design/REVIEW.md` and opens ONE unified page
    (`design/decisions/index.html` — brand scenes per option, measured
    contrast/AA rows, one document per operator moment; per-decision pages
-   stay as the durable, slug-addressed artifacts). Before opening, author
+   stay as the durable, slug-addressed artifacts). Set `DESIGN_RAILS_OPENER`
+   to a command that opens a file to have `--open` try it before the platform
+   default. Before opening, author
    each block's `Role:` (the substitution slot) and `Recommend:` (your
    design read, reasoned from the measurements — and when neither listed
    option is right, ADD the better one first). Human picks; record with

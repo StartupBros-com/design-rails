@@ -118,15 +118,61 @@ test("the empty-frontmatter trap fails valid even when the file exists", () => {
   });
 });
 
-test("wired requires BOTH the mention and a CLAUDE.md for Claude Code to load", () => {
+// Claude Code 2.1.277+ reads AGENTS.md directly when no CLAUDE.md sits on the
+// path — so an app that mentions the system in AGENTS.md alone is wired.
+test("wired: an AGENTS.md with no CLAUDE.md anywhere on its path loads directly (Claude Code 2.1.277+)", () => {
   withRoot((root) => {
     seedWorkspace(root);
     rmSync(join(root, "apps/healthy/CLAUDE.md"));
     const d = JSON.parse(posture(root).stdout);
     const healthy = d.results.find((x) => x.app === "apps/healthy");
     const wired = healthy.rows.find((r) => r.check === "wired");
+    assert.equal(wired.pass, true);
+    assert.match(wired.note, /loads AGENTS\.md directly/);
+  });
+});
+
+// The user-scope ~/.claude/CLAUDE.md sits on the walk for every repo under
+// $HOME, and Claude Code exempts it. Without the exemption the pass path above
+// is reachable only from /tmp fixtures.
+test("wired: the user-scope ~/.claude/CLAUDE.md is not a blocker for a repo under HOME", () => {
+  withRoot((home) => {
+    write(home, ".claude/CLAUDE.md", "# personal rules\n");
+    const root = join(home, "SITES", "repo");
+    seedWorkspace(root);
+    rmSync(join(root, "apps/healthy/CLAUDE.md"));
+    const env = { ...process.env, HOME: home };
+    delete env.CLAUDE_CONFIG_DIR;
+    const r = spawnSync(process.execPath, [posturePath, root, "--json"], { encoding: "utf8", env });
+    const d = JSON.parse(r.stdout);
+    const healthy = d.results.find((x) => x.app === "apps/healthy");
+    const wired = healthy.rows.find((r) => r.check === "wired");
+    assert.equal(wired.pass, true, wired.note);
+    // ...while a real ancestor CLAUDE.md in that same HOME still blocks.
+    write(home, "CLAUDE.md", "@AGENTS.md\n");
+    const r2 = spawnSync(process.execPath, [posturePath, root, "--json"], { encoding: "utf8", env });
+    const wired2 = JSON.parse(r2.stdout).results.find((x) => x.app === "apps/healthy").rows.find((x) => x.check === "wired");
+    assert.equal(wired2.pass, false);
+    assert.match(wired2.note, /never loads/);
+  });
+});
+
+// The planted negative from a real monorepo: the same app under a stub-pair
+// root (CLAUDE.md = "@AGENTS.md") differs ONLY in the ancestor file, and now
+// the engine attaches only nested files named CLAUDE.md — the app's AGENTS.md
+// is dead content. An implementation that merely checks "AGENTS.md exists"
+// passes both cases above and fails this one.
+test("wired: an ancestor CLAUDE.md keeps Claude on the CLAUDE.md path, so an unstubbed nested AGENTS.md never loads", () => {
+  withRoot((root) => {
+    seedWorkspace(root);
+    rmSync(join(root, "apps/healthy/CLAUDE.md"));
+    write(root, "CLAUDE.md", "@AGENTS.md\n");
+    const d = JSON.parse(posture(root).stdout);
+    const healthy = d.results.find((x) => x.app === "apps/healthy");
+    const wired = healthy.rows.find((r) => r.check === "wired");
     assert.equal(wired.pass, false);
-    assert.match(wired.note, /no CLAUDE\.md/);
+    assert.match(wired.note, /never loads/);
+    assert.match(wired.note, /CLAUDE\.md/);
   });
 });
 

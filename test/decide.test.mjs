@@ -1,6 +1,6 @@
 import { withTempDirectory, write } from "./helpers/fixtures.mjs";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -386,5 +386,42 @@ test("--open off-WSL keeps the old fallback hint and never fails", () => {
     delete env.WSL_DISTRO_NAME;
     const r = spawnSync(process.execPath, [decidePath, root, "--open"], { encoding: "utf8", env });
     assert.equal(r.status, 0, r.stderr);
+  });
+});
+
+// A stub opener that records the path it was handed, then exits with `code`.
+// PATH points nowhere, so nothing in the platform chain can launch a browser.
+const withOpener = (code, run) =>
+  withTempDirectory("dd-opener-", (dir) => {
+    const marker = join(dir, "opened.txt");
+    const opener = join(dir, "opener");
+    write(dir, "opener", `#!/bin/sh\nprintf '%s' "$1" > '${marker}'\nexit ${code}\n`);
+    chmodSync(opener, 0o755);
+    const env = { ...process.env, PATH: "/nonexistent-bin", DESIGN_RAILS_OPENER: opener };
+    delete env.WSL_DISTRO_NAME;
+    return run({ env, marker });
+  });
+
+test("--open tries DESIGN_RAILS_OPENER first and stops when it exits 0", { skip: process.platform === "win32" }, () => {
+  withApp((root) => {
+    seedReview(root);
+    withOpener(0, ({ env, marker }) => {
+      const r = spawnSync(process.execPath, [decidePath, root, "--open"], { encoding: "utf8", env });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(readFileSync(marker, "utf8"), join(root, "design", "decisions", "index.html"));
+      assert.doesNotMatch(r.stdout, /no opener worked here/);
+    });
+  });
+});
+
+test("--open falls through to the platform chain when DESIGN_RAILS_OPENER fails", { skip: process.platform === "win32" }, () => {
+  withApp((root) => {
+    seedReview(root);
+    withOpener(3, ({ env, marker }) => {
+      const r = spawnSync(process.execPath, [decidePath, root, "--open"], { encoding: "utf8", env });
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(existsSync(marker), "the override was tried");
+      assert.match(r.stdout, /open the index path above by hand|paste into your Windows browser/);
+    });
   });
 });
