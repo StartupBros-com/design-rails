@@ -259,8 +259,8 @@ function pickText(hex) {
   return lum > 0.55 ? "#111114" : "#ffffff";
 }
 
-function renderPage(d, ctx, appName) {
-  const opts = d.options
+function renderOptions(d, ctx) {
+  return d.options
     .map(
       (o) => `
     <section class="option${d.recommend && d.recommend.option === o.name ? " recommended" : ""}">
@@ -272,6 +272,10 @@ function renderPage(d, ctx, appName) {
     </section>`,
     )
     .join("\n");
+}
+
+function renderPage(d, ctx, appName) {
+  const opts = renderOptions(d, ctx);
   return `<!doctype html>\n<!-- design-rails:decide -->\n<meta charset="utf-8">\n<title>${esc(d.title)} — ${esc(appName)} design decision</title>
 <style>
   body{font:15px/1.5 system-ui;margin:2rem auto;max-width:920px;padding:0 1rem;color:#1a1a1a}
@@ -308,18 +312,7 @@ ${d.recommend ? `<div class="recommendation"><strong>Recommendation: <code>${esc
 // what a human actually opens. Markup mirrors renderPage's body.
 function renderIndex(decisions, ctx, appName) {
   const section = (d) => {
-    const opts = d.options
-      .map(
-        (o) => `
-    <section class="option${d.recommend && d.recommend.option === o.name ? " recommended" : ""}">
-      <h2>Option <code>${esc(o.name)}</code>${d.recommend && d.recommend.option === o.name ? ' <span class="recbadge">recommended</span>' : ""}</h2>
-      ${d.kind === "chart" ? sampleChart(o.colors, ctx.canvas) : ""}
-      ${sampleRole(o.colors, ctx, d.role)}
-      ${metricsRow(o.colors, ctx, d.role)}
-      <p class="desc">${esc(o.desc)}</p>
-    </section>`,
-      )
-      .join("\n");
+    const opts = renderOptions(d, ctx);
     return `
 <section id="${esc(d.slug)}">
 <h2 class="dtitle">${esc(d.title)} <small>[open]</small></h2>
