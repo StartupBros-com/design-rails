@@ -1719,3 +1719,52 @@ test("a token FILE's declaration beats an ordinary stylesheet's, whatever the sc
   check("app.css"); // sorts BEFORE tokens.css
   check("zzz-legacy.css"); // sorts AFTER tokens.css
 });
+
+
+// The ratchet and the gate must agree on the count represented by each key.
+for (const [key, count] of [
+  ["color", 6],
+  ["apps/factory:color", 6],
+  ["apps/factory@ttr:color", 3],
+  ["orphan", 1],
+  ["palette", 0],
+]) {
+  test(`tighten and fail-on use the same ${key} count`, () => {
+    withTempProject((root) => {
+      writeBrandFactory(root);
+      write(root, "src/orphans.css", "a { color: var(--missing); background: var(--missing); }");
+      const ci = join(root, "ci.yml");
+      write(root, "ci.yml", `run: node scan.mjs . --fail-on=${key}=99\n`);
+      const run = (...args) => spawnSync(process.execPath, [scriptPath, root, ...args], { encoding: "utf8" });
+      const tightened = run(`--tighten=${ci}`);
+      assert.equal(tightened.status, 0, tightened.stderr);
+      assert.equal(readFileSync(ci, "utf8"), `run: node scan.mjs . --fail-on=${key}=${count}\n`);
+      const exact = run(`--fail-on=${key}=${count}`);
+      assert.equal(exact.status, 0, exact.stderr);
+      if (count > 0) {
+        const over = run(`--fail-on=${key}=${count - 1}`);
+        assert.equal(over.status, 1, over.stderr);
+        assert.ok(over.stderr.includes(`${key} ${count} > ${count - 1}`), over.stderr);
+      }
+    });
+  });
+}
+
+for (const key of ["color", "apps/factory:color", "apps/factory@ttr:color", "orphan"]) {
+  test(`missing ${key} detector preserves each caller's diagnostic and budget file`, () => {
+    withTempProject((root) => {
+      writeBrandFactory(root);
+      const ci = join(root, "ci.yml");
+      const original = `run: node scan.mjs . --fail-on=${key}=99\n`;
+      write(root, "ci.yml", original);
+      const run = (...args) => spawnSync(process.execPath, [scriptPath, root, "--only=palette", ...args], { encoding: "utf8" });
+      const tightened = run(`--tighten=${ci}`);
+      assert.equal(tightened.status, 2);
+      assert.equal(tightened.stderr, `design-drift: budget names '${key}' but that detector did not run\n`);
+      assert.equal(readFileSync(ci, "utf8"), original);
+      const gate = run(`--fail-on=${key}=99`);
+      assert.equal(gate.status, 2);
+      assert.equal(gate.stderr, `design-drift: budget names '${key}' but that detector did not run (--only/--skip?)\n`);
+    });
+  });
+}

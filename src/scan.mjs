@@ -1717,6 +1717,15 @@ const git = gitState(root);
 if (git) report.git = git;
 console.log(asJson ? JSON.stringify(report, null, 2) : render(report));
 
+// Tightening and enforcement must measure each budget through the same scope.
+// Orphans count unresolved names; other detectors count occurrences.
+// Keep caller-specific missing-detector diagnostics at the call sites.
+function budgetCount({ region, id, brand }) {
+  if (brand) return brandCount(id, brand.surfaces, brand.unit);
+  if (region !== null) return regionCount(id, region);
+  return id === "orphan" ? report.findings.orphan?.unresolved : report.findings[id]?.occurrences;
+}
+
 // --tighten=<file>: the one-way ratchet as a command. Reads the file's
 // --fail-on=<spec> (global and region keys alike), lowers every budget to the
 // measured actual, and REFUSES when any actual exceeds its budget: absorbing
@@ -1748,16 +1757,10 @@ if (tightenPath || bumpRaw !== null) {
       );
     }
   }
-  const measuredT = (id) =>
-    id === "orphan" ? report.findings.orphan?.unresolved : report.findings[id]?.occurrences;
   // Region keys read through the same tally the gate enforces, so tighten can
   // never write a number the gate would disagree with.
   const actualFor = ({ key, region, id, brand }) => {
-    const n = brand
-      ? brandCount(id, brand.surfaces, brand.unit)
-      : region === null
-        ? measuredT(id)
-        : regionCount(id, region);
+    const n = budgetCount({ region, id, brand });
     if (n === undefined) {
       console.error(`design-drift: budget names '${key}' but that detector did not run`);
       process.exit(2);
@@ -1914,14 +1917,6 @@ if (tightenPath || bumpRaw !== null) {
 }
 
 if (FAIL_ON !== null) {
-  // `orphan` counts unresolved names rather than occurrences; every other
-  // detector counts hits. Both are "how much drift is there", so both can be
-  // budgeted — just read the right field.
-  const measured = (id) =>
-    id === "orphan"
-      ? report.findings.orphan?.unresolved
-      : report.findings[id]?.occurrences;
-
   const over = [];
   if (FAIL_ON.total !== undefined) {
     if (report.totalOccurrences > FAIL_ON.total) {
@@ -1929,11 +1924,7 @@ if (FAIL_ON !== null) {
     }
   } else {
     for (const { key, region, id, brand, budget } of FAIL_ON.per) {
-      const n = brand
-        ? brandCount(id, brand.surfaces, brand.unit)
-        : region === null
-          ? measured(id)
-          : regionCount(id, region);
+      const n = budgetCount({ region, id, brand });
       if (n === undefined) {
         console.error(`design-drift: budget names '${key}' but that detector did not run (--only/--skip?)`);
         process.exit(2);
